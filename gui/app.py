@@ -7,7 +7,7 @@ from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 
 from core.pwb_exporter import export_violation_ctg
-from core.column_blacklist import apply_blacklist, apply_row_filter
+from core.column_blacklist import apply_blacklist, apply_row_filter, apply_dedup_limviolid
 
 
 # Map human-friendly labels to filename substrings we look for
@@ -23,13 +23,16 @@ class PwbExportApp(tk.Tk):
         super().__init__()
 
         self.title("PowerWorld Contingency Violations Export (ViolationCTG)")
-        self.geometry("1050x680")
+        self.geometry("1050x650")
 
         self.pwb_path = tk.StringVar(value="No .pwb file selected")
         self.folder_path = tk.StringVar(value="No folder selected")
 
         # For folder mode: label -> full path
         self.target_cases = {}
+
+        # Checkbox: keep only highest LimViolPct per LimViolID (default ON)
+        self.dedup_enabled = tk.BooleanVar(value=True)
 
         self._build_gui()
 
@@ -53,7 +56,15 @@ class PwbExportApp(tk.Tk):
             text="Process selected .pwb (export + filter)",
             command=self.run_export_single,
         )
-        run_btn.grid(row=2, column=0, columnspan=3, pady=(10, 0), sticky="w")
+        run_btn.grid(row=2, column=0, columnspan=3, pady=(6, 0), sticky="w")
+
+        # Checkbox row for extra filter
+        dedup_chk = ttk.Checkbutton(
+            top,
+            text="Keep only highest LimViolPct per LimViolID",
+            variable=self.dedup_enabled,
+        )
+        dedup_chk.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         # Folder frame: folder selection + tree
         folder_frame = ttk.LabelFrame(self, text="Folder processing (3 ACCA/DC cases)")
@@ -73,7 +84,7 @@ class PwbExportApp(tk.Tk):
 
         process_folder_btn = ttk.Button(
             folder_frame,
-            text="Process 3 ACCA/DC cases in folder",
+            text="Process 3 ACCA/DC cases in folder (export + filters)",
             command=self.run_export_folder,
         )
         process_folder_btn.grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
@@ -105,16 +116,6 @@ class PwbExportApp(tk.Tk):
 
         # Tag for the 3 important cases so they stand out
         self.case_tree.tag_configure("target", foreground="blue")
-
-        # Extra filters frame
-        extra_frame = ttk.LabelFrame(self, text="Additional CSV filters")
-        extra_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
-
-        ttk.Button(
-            extra_frame,
-            text="Filter CSV to max LimViolPct per LimViolID…",
-            command=self.filter_max_limviol_per_id,
-        ).pack(anchor="w", padx=5, pady=5)
 
         # Log / output area
         log_frame = ttk.Frame(self)
@@ -270,18 +271,11 @@ class PwbExportApp(tk.Tk):
             ext = ".csv"
         return f"{base}_Filtered{ext}"
 
-    @staticmethod
-    def _make_max_path(original_csv: str) -> str:
-        base, ext = os.path.splitext(original_csv)
-        if not ext:
-            ext = ".csv"
-        return f"{base}_MaxLimViol{ext}"
-
     def _process_single_case(self, pwb_path: str):
         """
         For a single .pwb:
         - Export ViolationCTG to CSV via SimAuto
-        - Read CSV, apply row filter & column blacklist
+        - Read CSV, apply row filter, optional dedup filter, column blacklist
         - Write filtered CSV
         """
         self.log("\nConnecting to PowerWorld and exporting ViolationCTG...")
@@ -301,6 +295,7 @@ class PwbExportApp(tk.Tk):
         - Use row 2 as headers
         - Treat row 3+ as data
         - FIRST apply row filter (e.g., LimViolCat == 'Branch MVA')
+        - THEN (optionally) dedup by LimViolID / LimViolPct
         - THEN apply column blacklist
         - Save a new filtered CSV
         """
@@ -322,14 +317,27 @@ class PwbExportApp(tk.Tk):
                 data = raw.iloc[1:].copy()
                 data.columns = header_row
 
-                # 1) Apply row filter FIRST (uses LimViolCat before we drop it)
-                self.log(
-                    "\nApplying row filter (e.g., only keep LimViolCat == 'Branch MVA')..."
-                )
+                # 1) Apply row filter FIRST (uses LimViolCat)
+                self.log("\nApplying row filter (only keep LimViolCat == 'Branch MVA')...")
                 filtered_data, removed_rows = apply_row_filter(data, self.log)
                 self.log(f"Rows removed by row filter: {removed_rows}")
 
-                # 2) Apply column blacklist
+                # 2) Optional dedup filter by LimViolID / LimViolPct
+                if self.dedup_enabled.get():
+                    self.log(
+                        "\nDedup filter is ON: keeping only highest LimViolPct "
+                        "per LimViolID..."
+                    )
+                    filtered_data, removed_dupes = apply_dedup_limviolid(
+                        filtered_data, self.log, enabled=True
+                    )
+                    self.log(
+                        f"Rows removed by LimViolID/LimViolPct dedup filter: {removed_dupes}"
+                    )
+                else:
+                    self.log("\nDedup filter is OFF: all rows kept per LimViolID.")
+
+                # 3) Apply column blacklist
                 self.log("\nApplying column blacklist...")
                 filtered_data, removed_cols = apply_blacklist(filtered_data)
 
@@ -354,75 +362,3 @@ class PwbExportApp(tk.Tk):
 
         except Exception as e:
             self.log(f"(Could not read CSV for header inspection: {e})")
-
-    # ───────────── EXTRA FILTER: MAX LimViolPct PER LimViolID ───────────── #
-
-    def filter_max_limviol_per_id(self):
-        """
-        Optional extra filter:
-        - Pick a CSV file (typically a *_Filtered.csv).
-        - Group by LimViolID.
-        - Keep only the row with the highest LimViolPct per LimViolID.
-        - Save as *_MaxLimViol.csv.
-        """
-        path = filedialog.askopenfilename(
-            title="Select filtered CSV to reduce by LimViolID",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-
-        self.log(f"\nLoading CSV for max-LimViolPct-per-LimViolID filter:\n{path}")
-
-        try:
-            df = pd.read_csv(path)
-
-            if "LimViolID" not in df.columns or "LimViolPct" not in df.columns:
-                msg = (
-                    "CSV must contain 'LimViolID' and 'LimViolPct' columns "
-                    "to apply this filter."
-                )
-                self.log("ERROR: " + msg)
-                messagebox.showerror("Missing columns", msg)
-                return
-
-            # Ensure LimViolPct is numeric
-            df["LimViolPct"] = pd.to_numeric(df["LimViolPct"], errors="coerce")
-
-            before = len(df)
-            # idxmax finds the index of the max LimViolPct within each LimViolID group
-            idx = df.groupby("LimViolID")["LimViolPct"].idxmax()
-            filtered = df.loc[idx].copy()
-
-            # Optionally sort for nicer viewing
-            filtered.sort_values(
-                by=["LimViolID", "LimViolPct"],
-                ascending=[True, False],
-                inplace=True,
-            )
-
-            after = len(filtered)
-            removed = before - after
-
-            out_path = self._make_max_path(path)
-            filtered.to_csv(out_path, index=False)
-
-            self.log(
-                f"Max-LimViolPct-per-LimViolID filter applied.\n"
-                f"  Rows before: {before}\n"
-                f"  Rows after:  {after}\n"
-                f"  Rows removed: {removed}"
-            )
-            self.log(f"Output written to:\n  {out_path}")
-
-            messagebox.showinfo(
-                "Max LimViolPct filter complete",
-                f"Reduced file saved as:\n{out_path}\n\n"
-                f"Rows removed: {removed}",
-            )
-
-        except Exception as e:
-            self.log(f"ERROR applying max-LimViolPct-per-LimViolID filter: {e}")
-            messagebox.showerror(
-                "Error", f"Failed to apply max-LimViolPct-per-LimViolID filter:\n{e}"
-            )
