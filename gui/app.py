@@ -7,7 +7,11 @@ from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 
 from core.pwb_exporter import export_violation_ctg
-from core.column_blacklist import apply_blacklist, apply_row_filter, apply_dedup_limviolid
+from core.column_blacklist import (
+    apply_blacklist,
+    apply_row_filter,
+    apply_limviolid_max_filter,
+)
 
 
 # Map human-friendly labels to filename substrings we look for
@@ -23,7 +27,7 @@ class PwbExportApp(tk.Tk):
         super().__init__()
 
         self.title("PowerWorld Contingency Violations Export (ViolationCTG)")
-        self.geometry("1050x650")
+        self.geometry("1050x680")
 
         self.pwb_path = tk.StringVar(value="No .pwb file selected")
         self.folder_path = tk.StringVar(value="No folder selected")
@@ -31,8 +35,8 @@ class PwbExportApp(tk.Tk):
         # For folder mode: label -> full path
         self.target_cases = {}
 
-        # Checkbox: keep only highest LimViolPct per LimViolID (default ON)
-        self.dedup_enabled = tk.BooleanVar(value=True)
+        # Checkbox for LimViolID max filter (default ON)
+        self.max_filter_var = tk.BooleanVar(value=True)
 
         self._build_gui()
 
@@ -56,15 +60,7 @@ class PwbExportApp(tk.Tk):
             text="Process selected .pwb (export + filter)",
             command=self.run_export_single,
         )
-        run_btn.grid(row=2, column=0, columnspan=3, pady=(6, 0), sticky="w")
-
-        # Checkbox row for extra filter
-        dedup_chk = ttk.Checkbutton(
-            top,
-            text="Keep only highest LimViolPct per LimViolID",
-            variable=self.dedup_enabled,
-        )
-        dedup_chk.grid(row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        run_btn.grid(row=2, column=0, columnspan=3, pady=(10, 0), sticky="w")
 
         # Folder frame: folder selection + tree
         folder_frame = ttk.LabelFrame(self, text="Folder processing (3 ACCA/DC cases)")
@@ -84,7 +80,7 @@ class PwbExportApp(tk.Tk):
 
         process_folder_btn = ttk.Button(
             folder_frame,
-            text="Process 3 ACCA/DC cases in folder (export + filters)",
+            text="Process 3 ACCA/DC cases in folder",
             command=self.run_export_folder,
         )
         process_folder_btn.grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
@@ -116,6 +112,16 @@ class PwbExportApp(tk.Tk):
 
         # Tag for the 3 important cases so they stand out
         self.case_tree.tag_configure("target", foreground="blue")
+
+        # Filters frame (for options like LimViolID max filter)
+        filters_frame = ttk.LabelFrame(self, text="Filters")
+        filters_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 5))
+
+        ttk.Checkbutton(
+            filters_frame,
+            text="Deduplicate LimViolID (keep row(s) with max LimViolPct)",
+            variable=self.max_filter_var,
+        ).pack(anchor="w", padx=5, pady=3)
 
         # Log / output area
         log_frame = ttk.Frame(self)
@@ -275,7 +281,7 @@ class PwbExportApp(tk.Tk):
         """
         For a single .pwb:
         - Export ViolationCTG to CSV via SimAuto
-        - Read CSV, apply row filter, optional dedup filter, column blacklist
+        - Read CSV, apply row filter & optional LimViolID max filter & column blacklist
         - Write filtered CSV
         """
         self.log("\nConnecting to PowerWorld and exporting ViolationCTG...")
@@ -294,8 +300,8 @@ class PwbExportApp(tk.Tk):
         - Skip row 1 (the single 'ViolationCTG' cell)
         - Use row 2 as headers
         - Treat row 3+ as data
-        - FIRST apply row filter (e.g., LimViolCat == 'Branch MVA')
-        - THEN (optionally) dedup by LimViolID / LimViolPct
+        - FIRST apply row filter (LimViolCat)
+        - THEN optionally apply LimViolID max filter
         - THEN apply column blacklist
         - Save a new filtered CSV
         """
@@ -317,25 +323,23 @@ class PwbExportApp(tk.Tk):
                 data = raw.iloc[1:].copy()
                 data.columns = header_row
 
-                # 1) Apply row filter FIRST (uses LimViolCat)
+                # 1) Apply row filter FIRST (uses LimViolCat before we drop it)
                 self.log("\nApplying row filter (only keep LimViolCat == 'Branch MVA')...")
                 filtered_data, removed_rows = apply_row_filter(data, self.log)
                 self.log(f"Rows removed by row filter: {removed_rows}")
 
-                # 2) Optional dedup filter by LimViolID / LimViolPct
-                if self.dedup_enabled.get():
+                # 2) Optional LimViolID max filter
+                if self.max_filter_var.get():
                     self.log(
-                        "\nDedup filter is ON: keeping only highest LimViolPct "
-                        "per LimViolID..."
+                        "\nApplying LimViolID max filter "
+                        "(keep row(s) with highest LimViolPct per LimViolID)..."
                     )
-                    filtered_data, removed_dupes = apply_dedup_limviolid(
-                        filtered_data, self.log, enabled=True
+                    filtered_data, removed_max = apply_limviolid_max_filter(
+                        filtered_data, self.log
                     )
-                    self.log(
-                        f"Rows removed by LimViolID/LimViolPct dedup filter: {removed_dupes}"
-                    )
+                    self.log(f"Rows removed by LimViolID max filter: {removed_max}")
                 else:
-                    self.log("\nDedup filter is OFF: all rows kept per LimViolID.")
+                    self.log("\nLimViolID max filter is disabled; skipping.")
 
                 # 3) Apply column blacklist
                 self.log("\nApplying column blacklist...")
