@@ -8,7 +8,7 @@ import pandas as pd
 
 from .header_filter_dialog import HeaderFilterDialog
 from core.pwb_exporter import export_violation_ctg
-from core.column_blacklist import apply_blacklist
+from core.column_blacklist import apply_blacklist, apply_row_filter
 
 
 class PwbExportApp(tk.Tk):
@@ -119,7 +119,8 @@ class PwbExportApp(tk.Tk):
         - Skip row 1 (the single 'ViolationCTG' cell)
         - Use row 2 as headers
         - Treat row 3+ as data
-        - Apply blacklist to remove unwanted columns
+        - FIRST apply row filter (e.g., LimViolCat == 'Branch MVA')
+        - THEN apply column blacklist
         - Save a new filtered CSV
         - Show header filter dialog and log filtered headers.
         """
@@ -142,39 +143,31 @@ class PwbExportApp(tk.Tk):
             for h in header_row:
                 self.log(f"  - {h}")
 
-            # Data rows are index >= 1
             if raw.shape[0] > 1:
+                # Data rows are index >= 1
                 data = raw.iloc[1:].copy()
                 data.columns = header_row
 
-                # Apply column blacklist
-self.log("\nApplying column blacklist...")
-filtered_data, removed_cols = apply_blacklist(data)
+                # 1) Apply row filter FIRST (uses LimViolCat before we drop it)
+                self.log("\nApplying row filter (e.g., LimViolCat == 'Branch MVA')...")
+                filtered_data, removed_rows = apply_row_filter(data, self.log)
+                self.log(f"Rows removed by row filter: {removed_rows}")
 
-if removed_cols:
-    self.log("Columns removed by blacklist:")
-    for c in removed_cols:
-        self.log(f"  - {c}")
-else:
-    self.log("No columns matched blacklist; no columns removed.")
-
-# Apply row filter
-self.log("\nApplying row filter (LimViolCat must be 'Branch MVA')...")
-from core.column_blacklist import apply_row_filter
-filtered_data, removed_rows = apply_row_filter(filtered_data, self.log)
-
-self.log(f"Rows removed by row filter: {removed_rows}")
-
-                filtered_csv = self._make_filtered_path(csv_path)
-                filtered_data.to_csv(filtered_csv, index=False)
-                self.log(f"Filtered CSV saved to:\n  {filtered_csv}")
+                # 2) Apply column blacklist
+                self.log("\nApplying column blacklist...")
+                filtered_data, removed_cols = apply_blacklist(filtered_data)
 
                 if removed_cols:
                     self.log("Columns removed by blacklist:")
                     for c in removed_cols:
                         self.log(f"  - {c}")
                 else:
-                    self.log("No columns matched blacklist; filtered file is same as original.")
+                    self.log("No columns matched blacklist; no columns removed.")
+
+                # Save filtered CSV
+                filtered_csv = self._make_filtered_path(csv_path)
+                filtered_data.to_csv(filtered_csv, index=False)
+                self.log(f"Filtered CSV saved to:\n  {filtered_csv}")
 
                 # Preview first few rows of filtered data
                 self.log("\nPreview of first few filtered data rows:")
@@ -182,7 +175,6 @@ self.log(f"Rows removed by row filter: {removed_rows}")
                 self.log(preview)
             else:
                 self.log("No data rows found after header row; nothing to filter.")
-                filtered_csv = None
 
             # Still open dialog so you can manually explore headers and
             # decide which ones to add to the blacklist file.
