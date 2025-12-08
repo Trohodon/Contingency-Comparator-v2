@@ -8,6 +8,7 @@ import pandas as pd
 
 from .header_filter_dialog import HeaderFilterDialog
 from core.pwb_exporter import export_violation_ctg
+from core.column_blacklist import apply_blacklist
 
 
 class PwbExportApp(tk.Tk):
@@ -93,13 +94,22 @@ class PwbExportApp(tk.Tk):
             messagebox.showerror("Error", str(e))
             return
 
-        # Now treat the CSV as our "temporary Excel sheet"
+        # Treat the CSV as our "temporary Excel sheet"
         if self.csv_path and os.path.exists(self.csv_path):
             self._post_process_csv(self.csv_path)
         else:
             self.log("WARNING: CSV file does not exist after export.")
 
         messagebox.showinfo("Done", f"ViolationCTG exported to:\n{self.csv_path}")
+
+    # ───────────── HELPERS ───────────── #
+
+    @staticmethod
+    def _make_filtered_path(original_csv: str) -> str:
+        base, ext = os.path.splitext(original_csv)
+        if not ext:
+            ext = ".csv"
+        return f"{base}_Filtered{ext}"
 
     # ───────────── CSV / HEADER HANDLING ───────────── #
 
@@ -109,6 +119,8 @@ class PwbExportApp(tk.Tk):
         - Skip row 1 (the single 'ViolationCTG' cell)
         - Use row 2 as headers
         - Treat row 3+ as data
+        - Apply blacklist to remove unwanted columns
+        - Save a new filtered CSV
         - Show header filter dialog and log filtered headers.
         """
         self.log("\nReading CSV to detect headers...")
@@ -134,11 +146,32 @@ class PwbExportApp(tk.Tk):
             if raw.shape[0] > 1:
                 data = raw.iloc[1:].copy()
                 data.columns = header_row
-                self.log("\nPreview of first few data rows (after header row):")
-                preview = data.head(10).to_string(index=False)
-                self.log(preview)
 
-            # Open dialog so user can choose columns to filter out
+                # Apply blacklist
+                self.log("\nApplying column blacklist...")
+                filtered_data, removed_cols = apply_blacklist(data)
+
+                filtered_csv = self._make_filtered_path(csv_path)
+                filtered_data.to_csv(filtered_csv, index=False)
+                self.log(f"Filtered CSV saved to:\n  {filtered_csv}")
+
+                if removed_cols:
+                    self.log("Columns removed by blacklist:")
+                    for c in removed_cols:
+                        self.log(f"  - {c}")
+                else:
+                    self.log("No columns matched blacklist; filtered file is same as original.")
+
+                # Preview first few rows of filtered data
+                self.log("\nPreview of first few filtered data rows:")
+                preview = filtered_data.head(10).to_string(index=False)
+                self.log(preview)
+            else:
+                self.log("No data rows found after header row; nothing to filter.")
+                filtered_csv = None
+
+            # Still open dialog so you can manually explore headers and
+            # decide which ones to add to the blacklist file.
             self.log(
                 "\nOpening header filter dialog so you can choose which\n"
                 "columns should be filtered out in future versions..."
