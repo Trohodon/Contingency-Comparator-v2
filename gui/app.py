@@ -120,62 +120,65 @@ class PwbExportApp(tk.Tk):
         - Use row 2 as headers
         - Treat row 3+ as data
         - Apply blacklist to remove unwanted columns
+        - Filter rows to only keep 'Branch MVA'
         - Save a new filtered CSV
-        - Show header filter dialog and log filtered headers.
+        - Open header dialog for exploration
         """
         self.log("\nReading CSV to detect headers...")
         try:
-            # Skip the first row because it only has "ViolationCTG" in one column.
-            # After skiprows=1:
-            #   raw.iloc[0] -> original row 2 (the real header row)
-            #   raw.iloc[1:] -> original rows 3+ (data)
             raw = pd.read_csv(csv_path, header=None, skiprows=1)
 
             if raw.shape[0] < 1:
-                self.log("Not enough rows in CSV to extract headers (need at least 1).")
+                self.log("Not enough rows in CSV to extract headers.")
                 return
 
-            # First row in 'raw' is now the header row
+            # Header row
             header_row = list(raw.iloc[0])
-            self.log(f"Detected {len(header_row)} headers from row 2.")
-            self.log("Header names:")
+            self.log(f"Detected {len(header_row)} headers:")
             for h in header_row:
                 self.log(f"  - {h}")
 
-            # Data rows are index >= 1
-            if raw.shape[0] > 1:
-                data = raw.iloc[1:].copy()
-                data.columns = header_row
+            # Data rows
+            data = raw.iloc[1:].copy()
+            data.columns = header_row
 
-                # Apply blacklist
-                self.log("\nApplying column blacklist...")
-                filtered_data, removed_cols = apply_blacklist(data)
+            # --- Apply column blacklist ---
+            self.log("\nApplying column blacklist...")
+            filtered_data, removed_cols = apply_blacklist(data)
 
-                filtered_csv = self._make_filtered_path(csv_path)
-                filtered_data.to_csv(filtered_csv, index=False)
-                self.log(f"Filtered CSV saved to:\n  {filtered_csv}")
-
-                if removed_cols:
-                    self.log("Columns removed by blacklist:")
-                    for c in removed_cols:
-                        self.log(f"  - {c}")
-                else:
-                    self.log("No columns matched blacklist; filtered file is same as original.")
-
-                # Preview first few rows of filtered data
-                self.log("\nPreview of first few filtered data rows:")
-                preview = filtered_data.head(10).to_string(index=False)
-                self.log(preview)
+            if removed_cols:
+                self.log("Columns removed by blacklist:")
+                for c in removed_cols:
+                    self.log(f"  - {c}")
             else:
-                self.log("No data rows found after header row; nothing to filter.")
-                filtered_csv = None
+                self.log("No columns matched blacklist.")
 
-            # Still open dialog so you can manually explore headers and
-            # decide which ones to add to the blacklist file.
-            self.log(
-                "\nOpening header filter dialog so you can choose which\n"
-                "columns should be filtered out in future versions..."
-            )
+            # --- Row filtering based on LimViolCat ---
+            if "LimViolCat" in filtered_data.columns:
+                before_count = len(filtered_data)
+
+                # KEEP ONLY Branch MVA
+                filtered_data = filtered_data[filtered_data["LimViolCat"] == "Branch MVA"]
+
+                after_count = len(filtered_data)
+                removed = before_count - after_count
+
+                self.log("\nRow filter applied: keeping only 'Branch MVA'")
+                self.log(f"Rows removed due to 'Bus Low Volts' or others: {removed}")
+            else:
+                self.log("\nWARNING: 'LimViolCat' column not found — row filtering skipped.")
+
+            # Save filtered CSV
+            filtered_csv = self._make_filtered_path(csv_path)
+            filtered_data.to_csv(filtered_csv, index=False)
+            self.log(f"\nFiltered CSV saved to:\n  {filtered_csv}")
+
+            # Preview
+            self.log("\nPreview of first few filtered rows:")
+            self.log(filtered_data.head(10).to_string(index=False))
+
+            # Open header selection dialog
+            self.log("\nOpening header filter dialog...")
             HeaderFilterDialog(self, header_row, self.log)
 
         except Exception as e:
