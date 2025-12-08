@@ -4,6 +4,7 @@
 Central place for:
 - Removing unwanted columns (column blacklist)
 - Filtering unwanted ROWS (row filter)
+- Optional dedup filter on LimViolID (keep highest LimViolPct)
 """
 
 # ───────────────────────────────────────
@@ -18,7 +19,7 @@ BLACKLIST_BASE_NAMES = {
     "AreaNum",
     "AreaName",
     "ZoneNum",
-    # Add whatever else you've typed
+    # ...add the rest of your base names here...
 }
 
 BLACKLIST_EXACT_NAMES = {
@@ -50,7 +51,7 @@ def apply_blacklist(df):
 
 
 # ───────────────────────────────────────
-# ROW FILTER LOGIC
+# ROW FILTER LOGIC (LimViolCat)
 # ───────────────────────────────────────
 
 # Only keep rows where LimViolCat == "Branch MVA"
@@ -79,39 +80,42 @@ def apply_row_filter(df, log_func=None):
 
     return filtered_df, removed
 
-def apply_dedup_limviolid(df, log_func=None, enabled=True):
+
+# ───────────────────────────────────────
+# DEDUP FILTER LOGIC (LimViolID / LimViolPct)
+# ───────────────────────────────────────
+
+DEDUP_ID_COLUMN = "LimViolID"
+DEDUP_VALUE_COLUMN = "LimViolPct"
+
+
+def apply_limviolid_max_filter(df, log_func=None):
     """
-    Optional filter: for each LimViolID, keep only the row(s) with the
-    highest LimViolPct value. Returns (filtered_df, removed_rows).
+    For each LimViolID, keep only the row(s) with the highest LimViolPct.
+    Return (filtered_df, removed_count).
 
-    If 'enabled' is False, returns (df, 0) unchanged.
+    If LimViolID or LimViolPct is missing, does nothing.
     """
-    if not enabled:
-        return df, 0
-
-    if df.empty:
-        return df, 0
-
-    missing_cols = [c for c in ["LimViolID", "LimViolPct"] if c not in df.columns]
-    if missing_cols:
+    if DEDUP_ID_COLUMN not in df.columns or DEDUP_VALUE_COLUMN not in df.columns:
         if log_func:
             log_func(
-                "WARNING: Dedup filter skipped because required columns are missing: "
-                + ", ".join(missing_cols)
+                "WARNING: Cannot apply LimViolID max filter because "
+                f"'{DEDUP_ID_COLUMN}' or '{DEDUP_VALUE_COLUMN}' is missing."
             )
         return df, 0
 
-    tmp = df.copy()
+    before = len(df)
 
-    # Make sure LimViolPct is numeric so we can safely take max
-    tmp["_LimViolPct_num"] = pd.to_numeric(tmp["LimViolPct"], errors="coerce")
+    # Compute max LimViolPct per LimViolID
+    try:
+        max_per_id = df.groupby(DEDUP_ID_COLUMN)[DEDUP_VALUE_COLUMN].transform("max")
+    except Exception as e:
+        if log_func:
+            log_func(f"WARNING: Failed to compute max per LimViolID: {e}")
+        return df, 0
 
-    # For each LimViolID, compute the max LimViolPct
-    max_per_id = tmp.groupby("LimViolID")["_LimViolPct_num"].transform("max")
+    filtered_df = df[df[DEDUP_VALUE_COLUMN] == max_per_id].copy()
+    after = len(filtered_df)
+    removed = before - after
 
-    # Keep rows whose LimViolPct equals the group max
-    keep_mask = tmp["_LimViolPct_num"] == max_per_id
-    deduped = tmp[keep_mask].drop(columns=["_LimViolPct_num"])
-
-    removed = len(df) - len(deduped)
-    return deduped, removed
+    return filtered_df, removed
