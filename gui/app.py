@@ -23,7 +23,7 @@ class PwbExportApp(tk.Tk):
         super().__init__()
 
         self.title("PowerWorld Contingency Violations Export (ViolationCTG)")
-        self.geometry("1050x650")
+        self.geometry("1050x680")
 
         self.pwb_path = tk.StringVar(value="No .pwb file selected")
         self.folder_path = tk.StringVar(value="No folder selected")
@@ -105,6 +105,16 @@ class PwbExportApp(tk.Tk):
 
         # Tag for the 3 important cases so they stand out
         self.case_tree.tag_configure("target", foreground="blue")
+
+        # Extra filters frame
+        extra_frame = ttk.LabelFrame(self, text="Additional CSV filters")
+        extra_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+
+        ttk.Button(
+            extra_frame,
+            text="Filter CSV to max LimViolPct per LimViolID…",
+            command=self.filter_max_limviol_per_id,
+        ).pack(anchor="w", padx=5, pady=5)
 
         # Log / output area
         log_frame = ttk.Frame(self)
@@ -260,6 +270,13 @@ class PwbExportApp(tk.Tk):
             ext = ".csv"
         return f"{base}_Filtered{ext}"
 
+    @staticmethod
+    def _make_max_path(original_csv: str) -> str:
+        base, ext = os.path.splitext(original_csv)
+        if not ext:
+            ext = ".csv"
+        return f"{base}_MaxLimViol{ext}"
+
     def _process_single_case(self, pwb_path: str):
         """
         For a single .pwb:
@@ -290,9 +307,6 @@ class PwbExportApp(tk.Tk):
         self.log("\nReading CSV to detect headers...")
         try:
             # Skip the first row because it only has "ViolationCTG" in one column.
-            # After skiprows=1:
-            #   raw.iloc[0] -> original row 2 (the real header row)
-            #   raw.iloc[1:] -> original rows 3+ (data)
             raw = pd.read_csv(csv_path, header=None, skiprows=1)
 
             if raw.shape[0] < 1:
@@ -309,7 +323,9 @@ class PwbExportApp(tk.Tk):
                 data.columns = header_row
 
                 # 1) Apply row filter FIRST (uses LimViolCat before we drop it)
-                self.log("\nApplying row filter (e.g., only keep LimViolCat == 'Branch MVA')...")
+                self.log(
+                    "\nApplying row filter (e.g., only keep LimViolCat == 'Branch MVA')..."
+                )
                 filtered_data, removed_rows = apply_row_filter(data, self.log)
                 self.log(f"Rows removed by row filter: {removed_rows}")
 
@@ -338,3 +354,75 @@ class PwbExportApp(tk.Tk):
 
         except Exception as e:
             self.log(f"(Could not read CSV for header inspection: {e})")
+
+    # ───────────── EXTRA FILTER: MAX LimViolPct PER LimViolID ───────────── #
+
+    def filter_max_limviol_per_id(self):
+        """
+        Optional extra filter:
+        - Pick a CSV file (typically a *_Filtered.csv).
+        - Group by LimViolID.
+        - Keep only the row with the highest LimViolPct per LimViolID.
+        - Save as *_MaxLimViol.csv.
+        """
+        path = filedialog.askopenfilename(
+            title="Select filtered CSV to reduce by LimViolID",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        self.log(f"\nLoading CSV for max-LimViolPct-per-LimViolID filter:\n{path}")
+
+        try:
+            df = pd.read_csv(path)
+
+            if "LimViolID" not in df.columns or "LimViolPct" not in df.columns:
+                msg = (
+                    "CSV must contain 'LimViolID' and 'LimViolPct' columns "
+                    "to apply this filter."
+                )
+                self.log("ERROR: " + msg)
+                messagebox.showerror("Missing columns", msg)
+                return
+
+            # Ensure LimViolPct is numeric
+            df["LimViolPct"] = pd.to_numeric(df["LimViolPct"], errors="coerce")
+
+            before = len(df)
+            # idxmax finds the index of the max LimViolPct within each LimViolID group
+            idx = df.groupby("LimViolID")["LimViolPct"].idxmax()
+            filtered = df.loc[idx].copy()
+
+            # Optionally sort for nicer viewing
+            filtered.sort_values(
+                by=["LimViolID", "LimViolPct"],
+                ascending=[True, False],
+                inplace=True,
+            )
+
+            after = len(filtered)
+            removed = before - after
+
+            out_path = self._make_max_path(path)
+            filtered.to_csv(out_path, index=False)
+
+            self.log(
+                f"Max-LimViolPct-per-LimViolID filter applied.\n"
+                f"  Rows before: {before}\n"
+                f"  Rows after:  {after}\n"
+                f"  Rows removed: {removed}"
+            )
+            self.log(f"Output written to:\n  {out_path}")
+
+            messagebox.showinfo(
+                "Max LimViolPct filter complete",
+                f"Reduced file saved as:\n{out_path}\n\n"
+                f"Rows removed: {removed}",
+            )
+
+        except Exception as e:
+            self.log(f"ERROR applying max-LimViolPct-per-LimViolID filter: {e}")
+            messagebox.showerror(
+                "Error", f"Failed to apply max-LimViolPct-per-LimViolID filter:\n{e}"
+            )
