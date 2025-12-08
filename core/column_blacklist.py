@@ -78,3 +78,40 @@ def apply_row_filter(df, log_func=None):
     removed = before - after
 
     return filtered_df, removed
+
+def apply_dedup_limviolid(df, log_func=None, enabled=True):
+    """
+    Optional filter: for each LimViolID, keep only the row(s) with the
+    highest LimViolPct value. Returns (filtered_df, removed_rows).
+
+    If 'enabled' is False, returns (df, 0) unchanged.
+    """
+    if not enabled:
+        return df, 0
+
+    if df.empty:
+        return df, 0
+
+    missing_cols = [c for c in ["LimViolID", "LimViolPct"] if c not in df.columns]
+    if missing_cols:
+        if log_func:
+            log_func(
+                "WARNING: Dedup filter skipped because required columns are missing: "
+                + ", ".join(missing_cols)
+            )
+        return df, 0
+
+    tmp = df.copy()
+
+    # Make sure LimViolPct is numeric so we can safely take max
+    tmp["_LimViolPct_num"] = pd.to_numeric(tmp["LimViolPct"], errors="coerce")
+
+    # For each LimViolID, compute the max LimViolPct
+    max_per_id = tmp.groupby("LimViolID")["_LimViolPct_num"].transform("max")
+
+    # Keep rows whose LimViolPct equals the group max
+    keep_mask = tmp["_LimViolPct_num"] == max_per_id
+    deduped = tmp[keep_mask].drop(columns=["_LimViolPct_num"])
+
+    removed = len(df) - len(deduped)
+    return deduped, removed
