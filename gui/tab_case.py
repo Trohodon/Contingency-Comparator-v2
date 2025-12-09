@@ -33,6 +33,9 @@ class CaseProcessingTab(ttk.Frame):
         self.bus_lv_var = tk.BooleanVar(value=False)           # include Bus Low Volts
         self.delete_original_var = tk.BooleanVar(value=False)  # delete unfiltered CSV
 
+        # Flag to prevent re-entrancy / double-runs
+        self._is_running = False
+
         self._build_gui()
 
     # ───────────── Logging helper ───────────── #
@@ -61,11 +64,12 @@ class CaseProcessingTab(ttk.Frame):
             row=1, column=2, padx=(5, 0)
         )
 
-        ttk.Button(
+        self.single_btn = ttk.Button(
             top,
             text="Process selected .pwb (export + filter)",
             command=self.run_export_single,
-        ).grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
+        )
+        self.single_btn.grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
 
         # Folder frame: folder selection + tree
         folder = ttk.LabelFrame(self, text="Folder processing (ACCA/DC cases)")
@@ -80,11 +84,14 @@ class CaseProcessingTab(ttk.Frame):
             row=1, column=2, padx=(5, 0)
         )
 
-        ttk.Button(
+        self.process_folder_btn = ttk.Button(
             folder,
             text="Process ACCA/DC cases in folder / subfolders",
             command=self.run_export_folder,
-        ).grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
+        )
+        self.process_folder_btn.grid(
+            row=2, column=0, columnspan=3, pady=(8, 0), sticky="w"
+        )
 
         # Tree view (for immediate folder preview; subfolder mode will mostly log)
         tree_frame = ttk.Frame(folder)
@@ -163,6 +170,16 @@ class CaseProcessingTab(ttk.Frame):
             cats.add("Bus Low Volts")
         return cats
 
+    def _set_running(self, running: bool):
+        """Enable/disable buttons while a run is in progress."""
+        self._is_running = running
+        state = "disabled" if running else "normal"
+        self.single_btn.configure(state=state)
+        self.process_folder_btn.configure(state=state)
+        # Let UI redraw immediately
+        self.update_idletasks()
+        self.update()
+
     # ───────────── Single-case callbacks ───────────── #
 
     def browse_pwb(self):
@@ -175,6 +192,12 @@ class CaseProcessingTab(ttk.Frame):
             self.log(f"Selected case: {path}")
 
     def run_export_single(self):
+        if self._is_running:
+            messagebox.showinfo(
+                "Busy", "Processing is already running. Please wait for it to finish."
+            )
+            return
+
         pwb = self.pwb_path.get()
         if not pwb.lower().endswith(".pwb") or not os.path.exists(pwb):
             messagebox.showwarning(
@@ -189,7 +212,12 @@ class CaseProcessingTab(ttk.Frame):
                 "WARNING: No LimViolCat categories selected. Row filter will be skipped."
             )
 
+        self._set_running(True)
         try:
+            # Give UI a chance to repaint before heavy work
+            self.update_idletasks()
+            self.update()
+
             filtered_csv = process_case(
                 pwb,
                 dedup_enabled=self.max_filter_var.get(),
@@ -200,16 +228,17 @@ class CaseProcessingTab(ttk.Frame):
         except Exception as e:
             self.log(f"ERROR: {e}")
             messagebox.showerror("Error", str(e))
-            return
-
-        if filtered_csv:
-            messagebox.showinfo(
-                "Done", f"Processing complete.\nFiltered CSV:\n{filtered_csv}"
-            )
         else:
-            messagebox.showwarning(
-                "Done", "Processing finished, but no filtered CSV was created."
-            )
+            if filtered_csv:
+                messagebox.showinfo(
+                    "Done", f"Processing complete.\nFiltered CSV:\n{filtered_csv}"
+                )
+            else:
+                messagebox.showwarning(
+                    "Done", "Processing finished, but no filtered CSV was created."
+                )
+        finally:
+            self._set_running(False)
 
     # ───────────── Folder callbacks ───────────── #
 
@@ -267,6 +296,12 @@ class CaseProcessingTab(ttk.Frame):
             )
 
     def run_export_folder(self):
+        if self._is_running:
+            messagebox.showinfo(
+                "Busy", "Processing is already running. Please wait for it to finish."
+            )
+            return
+
         root = self.folder_path.get()
         if not os.path.isdir(root):
             messagebox.showwarning(
@@ -286,15 +321,18 @@ class CaseProcessingTab(ttk.Frame):
             if os.path.isdir(os.path.join(root, d))
         )
 
-        if subdirs:
-            # Multi-folder mode: each subfolder is a scenario
-            self._run_export_multi_folder(root, subdirs, cats)
-        else:
-            # Single-folder mode: just this folder with 3 cases
-            # Refresh target_cases in case the user changed folders after browsing
-            _, target_cases = scan_folder(root, self.log)
-            self.target_cases = target_cases
-            self._run_export_single_folder(root, cats)
+        self._set_running(True)
+        try:
+            if subdirs:
+                # Multi-folder mode: each subfolder is a scenario
+                self._run_export_multi_folder(root, subdirs, cats)
+            else:
+                # Single-folder mode: just this folder with 3 cases
+                _, target_cases = scan_folder(root, self.log)
+                self.target_cases = target_cases
+                self._run_export_single_folder(root, cats)
+        finally:
+            self._set_running(False)
 
     # ---------- Single-folder mode ---------- #
 
@@ -310,6 +348,10 @@ class CaseProcessingTab(ttk.Frame):
 
         errors = []
         for label in TARGET_PATTERNS:
+            # Keep UI responsive between cases
+            self.update_idletasks()
+            self.update()
+
             pwb_path = self.target_cases.get(label)
             if not pwb_path:
                 self.log(f"Skipping type [{label}] (not found).")
@@ -356,6 +398,10 @@ class CaseProcessingTab(ttk.Frame):
         errors = []
 
         for sub in subdirs:
+            # Keep UI responsive between scenario folders
+            self.update_idletasks()
+            self.update()
+
             scenario_folder = os.path.join(root, sub)
             self.log(f"\n=== Processing scenario folder: {sub} ===")
 
@@ -367,6 +413,10 @@ class CaseProcessingTab(ttk.Frame):
             case_csvs = {}
 
             for label in TARGET_PATTERNS:
+                # Keep UI responsive between case types
+                self.update_idletasks()
+                self.update()
+
                 pwb_path = target_cases.get(label)
                 if not pwb_path:
                     self.log(f"  [{sub}] Skipping type [{label}] (not found).")
