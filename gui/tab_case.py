@@ -224,49 +224,49 @@ class CaseProcessingTab(ttk.Frame):
         self._scan_and_display_folder(folder)
 
     def _scan_and_display_folder(self, folder: str):
-        """Preview .pwb files directly in this folder (subfolders handled at run time)."""
+        """Preview .pwb files directly in this folder.
+        If there are no .pwb files but there ARE subfolders, show those instead.
+        """
         self.case_tree.delete(*self.case_tree.get_children())
         self.target_cases = {}
 
+        # First: look for .pwb files directly in this folder
         cases, target_cases = scan_folder(folder, self.log)
         self.target_cases = target_cases
 
-        for info in cases:
-            tag = "target" if info["is_target"] else ""
+        if cases:
+            # Normal behaviour: show .pwb files
+            for info in cases:
+                tag = "target" if info["is_target"] else ""
+                self.case_tree.insert(
+                    "",
+                    "end",
+                    values=(info["filename"], info["type"]),
+                    tags=(tag,) if tag else (),
+                )
+            return
+
+        # If no .pwb files, show subfolders as "scenario" entries
+        subdirs = sorted(
+            d for d in os.listdir(folder)
+            if os.path.isdir(os.path.join(folder, d))
+        )
+
+        if not subdirs:
+            # Truly nothing to show
+            self.log("No .pwb files or subfolders found in this folder.")
+            return
+
+        self.log(
+            "No .pwb files directly in this folder; showing subfolders as scenarios."
+        )
+
+        for d in subdirs:
             self.case_tree.insert(
                 "",
                 "end",
-                values=(info["filename"], info["type"]),
-                tags=(tag,) if tag else (),
+                values=(d, "Scenario subfolder"),
             )
-
-    def run_export_folder(self):
-        root = self.folder_path.get()
-        if not os.path.isdir(root):
-            messagebox.showwarning(
-                "No folder selected", "Please select a valid folder."
-            )
-            return
-
-        cats = self._get_row_filter_categories()
-        if not cats:
-            self.log(
-                "WARNING: No LimViolCat categories selected. Row filter will be skipped."
-            )
-
-        # Look for subfolders inside the root folder.
-        subdirs = sorted(
-            d
-            for d in os.listdir(root)
-            if os.path.isdir(os.path.join(root, d))
-        )
-
-        if subdirs:
-            # NEW: multi-folder mode
-            self._run_export_multi_folder(root, subdirs, cats)
-        else:
-            # Old behaviour: just this one folder with 3 cases
-            self._run_export_single_folder(root, cats)
 
     # ---------- Single-folder (old behaviour) ---------- #
 
