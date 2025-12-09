@@ -7,7 +7,11 @@ from typing import Optional
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from core.comparator import list_sheets, build_case_type_comparison, CASE_TYPES_CANONICAL
+from core.comparator import (
+    list_sheets,
+    build_case_type_comparison,
+    CASE_TYPES_CANONICAL,
+)
 
 
 class CompareTab(ttk.Frame):
@@ -16,11 +20,12 @@ class CompareTab(ttk.Frame):
 
     - Open any Combined_ViolationCTG_Comparison.xlsx (or compatible workbook)
     - Choose left/right sheets
-    - Enter number of comparisons (per case type)
-    - See ACCA LongTerm, ACCA, DCwAC side-by-side (Left %, Right %, Δ%)
+    - Set a percent-loading threshold (default 80%)
+    - For each case type (ACCA LongTerm, ACCA, DCwAC) show rows sorted
+      highest-to-lowest by loading, with:
+         Left %, Right %, Δ% (or 'Only in left/right' when unmatched)
     """
 
-    # Mapping from tab label to canonical case type name used in the sheets
     CASE_TYPE_TABS = [
         ("ACCA LongTerm", "ACCA_LongTerm"),
         ("ACCA", "ACCA_P1,2,4,7"),
@@ -33,20 +38,22 @@ class CompareTab(ttk.Frame):
         self.workbook_path = tk.StringVar(value="No workbook loaded")
         self.left_sheet_var = tk.StringVar()
         self.right_sheet_var = tk.StringVar()
-        self.num_comp_var = tk.StringVar(value="0")  # 0 = show all
+
+        # New: percent loading threshold
+        self.threshold_var = tk.StringVar(value="80")
 
         self._sheets = []
         self._is_running = False
 
-        self.local_log = None
+        self.local_log: Optional[tk.Text] = None
         self.external_log_func = None
 
-        # One Treeview per tab keyed by canonical case type
+        # One Treeview per canonical case type
         self._trees: dict[str, ttk.Treeview] = {}
 
         self._build_gui()
 
-    # ------------- Logging helpers ------------- #
+    # ---------------- Logging helpers ---------------- #
 
     def log(self, msg: str):
         if self.local_log is not None:
@@ -63,7 +70,7 @@ class CompareTab(ttk.Frame):
         self.update_idletasks()
         self.update()
 
-    # ------------- GUI layout ------------- #
+    # ---------------- GUI layout ---------------- #
 
     def _build_gui(self):
         # Top: workbook selection
@@ -80,11 +87,11 @@ class CompareTab(ttk.Frame):
             row=0, column=2, sticky="w"
         )
 
-        ttk.Label(wb_frame, text="Number of comparisons:").grid(
+        ttk.Label(wb_frame, text="Percent loading threshold:").grid(
             row=0, column=3, sticky="e", padx=(10, 2)
         )
         ttk.Entry(
-            wb_frame, textvariable=self.num_comp_var, width=6
+            wb_frame, textvariable=self.threshold_var, width=6
         ).grid(row=0, column=4, sticky="w")
 
         wb_frame.columnconfigure(2, weight=1)
@@ -136,13 +143,13 @@ class CompareTab(ttk.Frame):
             tree.heading("issue", text="Resulting issue")
             tree.heading("left", text="Left %")
             tree.heading("right", text="Right %")
-            tree.heading("delta", text="Δ% (Right - Left)")
+            tree.heading("delta", text="Δ% (Right - Left) / Status")
 
             tree.column("cont", width=420, anchor="w")
             tree.column("issue", width=420, anchor="w")
             tree.column("left", width=80, anchor="e")
             tree.column("right", width=80, anchor="e")
-            tree.column("delta", width=120, anchor="e")
+            tree.column("delta", width=160, anchor="e")
 
             vs = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
             tree.configure(yscrollcommand=vs.set)
@@ -163,7 +170,7 @@ class CompareTab(ttk.Frame):
         self.local_log.configure(yscrollcommand=log_scroll.set)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # ------------- Callbacks ------------- #
+    # ---------------- Callbacks ---------------- #
 
     def browse_workbook(self):
         path = filedialog.askopenfilename(
@@ -224,25 +231,24 @@ class CompareTab(ttk.Frame):
             )
             return
 
-        # Parse number of comparisons
+        # Parse percent threshold
         try:
-            n_raw = self.num_comp_var.get().strip()
-            if n_raw == "" or n_raw == "0":
-                max_rows: Optional[int] = None
-            else:
-                max_rows = int(n_raw)
-                if max_rows <= 0:
-                    max_rows = None
+            thr_raw = self.threshold_var.get().strip()
+            threshold = float(thr_raw) if thr_raw else 0.0
+            if threshold < 0:
+                threshold = 0.0
         except ValueError:
             messagebox.showwarning(
-                "Invalid number",
-                "Number of comparisons must be an integer (or 0 for all).",
+                "Invalid threshold",
+                "Percent loading threshold must be a number (e.g. 80).",
             )
             return
 
         self.log(
-            f"\nComparing sheets:\n  Left:  {left_sheet}\n  Right: {right_sheet}\n"
-            f"  Max rows per case type: {max_rows if max_rows is not None else 'ALL'}"
+            f"\nComparing sheets:\n"
+            f"  Left:  {left_sheet}\n"
+            f"  Right: {right_sheet}\n"
+            f"  Threshold: {threshold:.2f}% (rows below this on BOTH sides are hidden)"
         )
 
         self._set_running(True)
@@ -257,12 +263,12 @@ class CompareTab(ttk.Frame):
                     right_sheet,
                     canonical,
                     label,
-                    max_rows,
+                    threshold,
                 )
         finally:
             self._set_running(False)
 
-    # ------------- Internal helpers ------------- #
+    # ---------------- Internal helpers ---------------- #
 
     def _compare_one_case_type(
         self,
@@ -271,47 +277,56 @@ class CompareTab(ttk.Frame):
         right_sheet: str,
         case_type_canonical: str,
         display_label: str,
-        max_rows: Optional[int],
+        threshold: float,
     ):
         """
         Build comparison DF for one case type and push it into that tab's Treeview.
+
+        Threshold behavior:
+          - If BOTH Left% and Right% exist and are < threshold -> row is skipped.
+          - If only Left% exists: keep row only if Left% >= threshold.
+          - If only Right% exists: keep row only if Right% >= threshold.
+
+        Δ% column:
+          - If both sides present: numeric Right - Left (2 decimals).
+          - Only left present: 'Only in left'
+          - Only right present: 'Only in right'
         """
         tree = self._trees.get(case_type_canonical)
         if tree is None:
             return
 
-        # Clear existing rows
+        # Clear any existing rows
         tree.delete(*tree.get_children())
 
         try:
+            # max_rows=None -> show all; sorting is handled inside comparator
             df = build_case_type_comparison(
                 workbook_path,
                 base_sheet=left_sheet,
                 new_sheet=right_sheet,
                 case_type=case_type_canonical,
-                max_rows=max_rows,
+                max_rows=None,
                 log_func=self.log,
             )
         except Exception as e:
             msg = f"ERROR comparing {display_label}: {e}"
             self.log(msg)
-            tree.insert(
-                "",
-                "end",
-                values=(msg, "", "", "", ""),
-            )
+            tree.insert("", "end", values=(msg, "", "", "", ""))
             return
 
         if df.empty:
-            # This means BOTH sheets had no contingencies for this case type
             msg = f"No contingencies for {display_label} in either sheet."
             self.log(f"  {msg}")
             tree.insert("", "end", values=(msg, "", "", "", ""))
             return
 
-        self.log(
-            f"  {display_label}: showing {len(df)} row(s)"
-        )
+        self.log(f"  {display_label}: raw rows={len(df)}")
+
+        def is_nan(x) -> bool:
+            return isinstance(x, float) and math.isnan(x)
+
+        kept_count = 0
 
         for _, row in df.iterrows():
             cont = str(row.get("Contingency", "") or "")
@@ -321,8 +336,37 @@ class CompareTab(ttk.Frame):
             right_pct = row.get("RightPct", math.nan)
             delta_pct = row.get("DeltaPct", math.nan)
 
-            def fmt(x):
-                if x is None or (isinstance(x, float) and math.isnan(x)):
+            # Determine max present loading for threshold test
+            values = []
+            if not is_nan(left_pct):
+                values.append(left_pct)
+            if not is_nan(right_pct):
+                values.append(right_pct)
+
+            if not values:
+                # nothing on either side – skip
+                continue
+
+            max_val = max(values)
+            if max_val < threshold:
+                # below threshold on both sides -> hide
+                continue
+
+            # Decide what to display in delta column
+            if is_nan(left_pct) and not is_nan(right_pct):
+                delta_text = "Only in right"
+            elif not is_nan(left_pct) and is_nan(right_pct):
+                delta_text = "Only in left"
+            elif is_nan(left_pct) and is_nan(right_pct):
+                delta_text = ""
+            else:
+                try:
+                    delta_text = f"{float(delta_pct):.2f}"
+                except Exception:
+                    delta_text = str(delta_pct)
+
+            def fmt_pct(x):
+                if is_nan(x):
                     return ""
                 try:
                     return f"{float(x):.2f}"
@@ -335,8 +379,17 @@ class CompareTab(ttk.Frame):
                 values=(
                     cont,
                     issue,
-                    fmt(left_pct),
-                    fmt(right_pct),
-                    fmt(delta_pct),
+                    fmt_pct(left_pct),
+                    fmt_pct(right_pct),
+                    delta_text,
                 ),
+            )
+            kept_count += 1
+
+        self.log(f"  {display_label}: shown rows={kept_count}")
+        if kept_count == 0:
+            tree.insert(
+                "",
+                "end",
+                values=(f"No rows >= {threshold:.2f}%", "", "", "", ""),
             )
