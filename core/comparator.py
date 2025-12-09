@@ -1,27 +1,15 @@
 # core/comparator.py
 #
 # Helpers for working with the formatted
-# Combined_ViolationCTG_Comparison.xlsx workbook.
+# Combined_ViolationCTG_Comparison.xlsx workbook and for building
+# batch comparison workbooks in a nicely formatted style.
 #
-# - list_sheets(workbook_path)
-# - build_case_type_comparison(...)
-# - compare_scenarios(...)
-# - build_pair_comparison_df(...)
-# - build_batch_comparison_workbook(...)
-#
-# Sheet layout assumptions:
-#   Each scenario sheet is formatted by comparison_builder and contains
-#   three blocks (ACCA LongTerm, ACCA, DCwAC).  Each block looks like:
-#
-#     (title row)       B: "ACCA LongTerm"   (merged B:E)
-#     (header row)      B: "Contingency Events"
-#                       C: "Resulting Issue"
-#                       D: "Contingency Value (MVA)"
-#                       E: "Percent Loading"
-#     (data rows)       B..E = values, until a fully-blank row
-#
-# Internally we convert this to:
-#   CaseType, CTGLabel, LimViolID, LimViolValue, LimViolPct
+# Public functions used by the GUI:
+#   - list_sheets(workbook_path)
+#   - build_case_type_comparison(...)
+#   - compare_scenarios(...)
+#   - build_pair_comparison_df(...)
+#   - build_batch_comparison_workbook(...)
 #
 
 from typing import Iterable, List, Dict, Optional, Sequence, Tuple
@@ -31,8 +19,10 @@ import os
 import pandas as pd
 
 try:
-    from openpyxl import load_workbook
+    from openpyxl import load_workbook, Workbook
     from openpyxl.worksheet.worksheet import Worksheet
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
 
     OPENPYXL_AVAILABLE = True
 except ImportError:
@@ -88,7 +78,7 @@ def _parse_scenario_sheet(ws: "Worksheet", log_func=None) -> pd.DataFrame:
 
         CaseType, CTGLabel, LimViolID, LimViolValue, LimViolPct
 
-    Sheet structure we produced in comparison_builder:
+    Sheet structure (from comparison_builder):
       - Title row: merged B:E, text is pretty case name ("ACCA LongTerm", "ACCA", "DCwAC")
       - Next row: headers in B..E
       - Following rows: data until blank row; then repeat for next case type.
@@ -275,7 +265,7 @@ def build_case_type_comparison(
 
 
 # ---------------------------------------------------------------------------
-# Workbook-level comparison sheet (optional – keeps existing behavior)
+# Workbook-level comparison sheet (existing feature)
 # ---------------------------------------------------------------------------
 
 
@@ -293,11 +283,6 @@ def compare_scenarios(
     into a new comparison sheet.
 
     Returns the workbook_path (same file) when successful.
-
-    mode:
-      - "all"    : show all matched rows (subject to abs(Δ%) >= threshold) plus unmatched
-      - "worse"  : show only rows where New% > Base% by at least threshold, plus unmatched
-      - "better" : show only rows where New% < Base% by at least threshold, plus unmatched
     """
     if log_func:
         log_func(
@@ -592,6 +577,134 @@ def _sanitize_sheet_name(name: str) -> str:
     return cleaned[:31]
 
 
+# ===== Formatting helpers for batch workbook =================================
+
+
+def _apply_table_styles(ws: Worksheet):
+    """
+    Set reasonable column widths and freeze panes for a formatted comparison sheet.
+    """
+    widths = {
+        2: 45,  # B: Contingency
+        3: 45,  # C: Resulting Issue
+        4: 15,  # D: Left %
+        5: 15,  # E: Right %
+        6: 22,  # F: Delta
+    }
+    for col_idx, width in widths.items():
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    # Freeze panes below the first header block
+    ws.freeze_panes = "B4"
+
+
+# Styles (approximate the blue style from the first tab)
+HEADER_FILL = PatternFill("solid", fgColor="305496")  # dark blue
+HEADER_FONT = Font(color="FFFFFF", bold=True)
+TITLE_FILL = HEADER_FILL
+TITLE_FONT = Font(color="FFFFFF", bold=True, size=12)
+THIN_BORDER = Border(
+    left=Side(style="thin"),
+    right=Side(style="thin"),
+    top=Side(style="thin"),
+    bottom=Side(style="thin"),
+)
+CELL_ALIGN_WRAP = Alignment(wrap_text=True, vertical="top")
+CELL_ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+
+def _write_formatted_pair_sheet(
+    wb: Workbook,
+    sheet_name: str,
+    df_pair: pd.DataFrame,
+):
+    """
+    Create one sheet in the batch workbook using the same style/structure
+    as the Combined_ViolationCTG_Comparison.xlsx sheet:
+
+        [Title row]   merged B:F, e.g. 'ACCA'
+        [Header row]  B: Contingency Events
+                      C: Resulting Issue
+                      D: Left %
+                      E: Right %
+                      F: Δ% (Right - Left) / Status
+        [Data rows]   grouped by case type, with a blank row between blocks.
+    """
+    ws = wb.create_sheet(title=sheet_name)
+    _apply_table_styles(ws)
+
+    if df_pair.empty:
+        ws.cell(row=2, column=2).value = "No rows above threshold."
+        return
+
+    current_row = 2
+
+    # Group by pretty CaseType name (ACCA LongTerm / ACCA / DCwAC)
+    for case_type_pretty in ["ACCA LongTerm", "ACCA", "DCwAC"]:
+        sub = df_pair[df_pair["CaseType"] == case_type_pretty].copy()
+        if sub.empty:
+            continue
+
+        # Title row (merged B:F)
+        ws.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=6)
+        title_cell = ws.cell(row=current_row, column=2)
+        title_cell.value = case_type_pretty
+        title_cell.fill = TITLE_FILL
+        title_cell.font = TITLE_FONT
+        title_cell.alignment = CELL_ALIGN_CENTER
+        current_row += 1
+
+        # Header row
+        headers = [
+            "Contingency Events",
+            "Resulting Issue",
+            "Left %",
+            "Right %",
+            "Δ% (Right - Left) / Status",
+        ]
+        for col_offset, header in enumerate(headers):
+            cell = ws.cell(row=current_row, column=2 + col_offset)
+            cell.value = header
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = CELL_ALIGN_CENTER
+            cell.border = THIN_BORDER
+        current_row += 1
+
+        # Data rows
+        for _, row in sub.iterrows():
+            cont = str(row.get("Contingency", "") or "")
+            issue = str(row.get("ResultingIssue", "") or "")
+            left_pct = row.get("LeftPct", None)
+            right_pct = row.get("RightPct", None)
+            delta = row.get("DeltaDisplay", "")
+
+            values = [cont, issue, left_pct, right_pct, delta]
+            for col_offset, val in enumerate(values):
+                cell = ws.cell(row=current_row, column=2 + col_offset)
+                cell.value = val
+                cell.border = THIN_BORDER
+
+                if col_offset in (0, 1):  # text columns
+                    cell.alignment = CELL_ALIGN_WRAP
+                else:
+                    cell.alignment = Alignment(horizontal="right", vertical="top")
+
+                # number formatting for percentages
+                if col_offset in (2, 3) and isinstance(val, (float, int)):
+                    cell.number_format = "0.00"
+
+            current_row += 1
+
+        # Blank row between blocks
+        current_row += 1
+
+
+# ---------------------------------------------------------------------------
+# Build full batch comparison workbook (pretty formatting)
+# ---------------------------------------------------------------------------
+
+
 def build_batch_comparison_workbook(
     src_workbook: str,
     pairs: Sequence[Tuple[str, str]],
@@ -600,15 +713,19 @@ def build_batch_comparison_workbook(
     log_func=None,
 ) -> str:
     """
-    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair.
+    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair,
+    using the same blue-block style as Combined_ViolationCTG_Comparison.xlsx.
 
-    Each sheet contains rows for all case types with columns:
-      CaseType, Contingency, ResultingIssue, LeftPct, RightPct, DeltaDisplay
+    Each sheet is grouped into ACCA LongTerm / ACCA / DCwAC blocks, with columns:
+      Contingency Events | Resulting Issue | Left % | Right % | Δ% (Right - Left) / Status
 
     threshold is the same loading threshold used by the GUI.
 
     Returns output_path.
     """
+    if not OPENPYXL_AVAILABLE:
+        raise RuntimeError("openpyxl is required to build the batch workbook.")
+
     if log_func:
         log_func(
             f"\n=== Building batch comparison workbook ===\n"
@@ -620,49 +737,51 @@ def build_batch_comparison_workbook(
     if not pairs:
         raise ValueError("No comparison pairs provided.")
 
-    # Create new workbook via pandas
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        used_names: set[str] = set()
+    wb = Workbook()
+    # Remove the default sheet; we'll create our own
+    default_sheet = wb.active
+    wb.remove(default_sheet)
 
-        for idx, (left_sheet, right_sheet) in enumerate(pairs, start=1):
-            if log_func:
-                log_func(
-                    f"Processing pair {idx}: '{left_sheet}' vs '{right_sheet}'..."
-                )
+    used_names: set[str] = set()
 
-            df_pair = build_pair_comparison_df(
-                src_workbook, left_sheet, right_sheet, threshold, log_func=log_func
+    for idx, (left_sheet, right_sheet) in enumerate(pairs, start=1):
+        if log_func:
+            log_func(f"Processing pair {idx}: '{left_sheet}' vs '{right_sheet}'...")
+
+        df_pair = build_pair_comparison_df(
+            src_workbook, left_sheet, right_sheet, threshold, log_func=log_func
+        )
+
+        if df_pair.empty:
+            # Create a tiny DF with a message so the sheet isn't totally blank
+            df_pair = pd.DataFrame(
+                [
+                    {
+                        "CaseType": "",
+                        "Contingency": "No rows above threshold.",
+                        "ResultingIssue": "",
+                        "LeftPct": None,
+                        "RightPct": None,
+                        "DeltaDisplay": "",
+                    }
+                ]
             )
 
-            if df_pair.empty:
-                # Still create a sheet with a simple message
-                df_pair = pd.DataFrame(
-                    [
-                        {
-                            "CaseType": "",
-                            "Contingency": "No rows above threshold.",
-                            "ResultingIssue": "",
-                            "LeftPct": None,
-                            "RightPct": None,
-                            "DeltaDisplay": "",
-                        }
-                    ]
-                )
+        # Sheet name: e.g. "Base_vs_Test1"
+        base_name = f"{left_sheet}_vs_{right_sheet}"
+        base_name = _sanitize_sheet_name(base_name)
 
-            # Sheet name: e.g. "Base_vs_Test1"
-            base_name = f"{left_sheet}_vs_{right_sheet}"
-            base_name = _sanitize_sheet_name(base_name)
+        name = base_name
+        counter = 2
+        while name in used_names:
+            suffix = f"_{counter}"
+            name = _sanitize_sheet_name(base_name[: (31 - len(suffix))] + suffix)
+            counter += 1
+        used_names.add(name)
 
-            # Ensure uniqueness
-            name = base_name
-            counter = 2
-            while name in used_names:
-                suffix = f"_{counter}"
-                name = _sanitize_sheet_name(base_name[: (31 - len(suffix))] + suffix)
-                counter += 1
-            used_names.add(name)
+        _write_formatted_pair_sheet(wb, name, df_pair)
 
-            df_pair.to_excel(writer, sheet_name=name, index=False)
+    wb.save(output_path)
 
     if log_func:
         log_func(f"Batch comparison workbook written to:\n{output_path}")
