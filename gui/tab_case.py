@@ -4,73 +4,75 @@ import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-import pandas as pd
-
-from core.pwb_exporter import export_violation_ctg
-from core.column_blacklist import (
-    apply_blacklist,
-    apply_row_filter,
-    apply_limviolid_max_filter,
-)
-
-TARGET_PATTERNS = {
-    "ACCA_LongTerm": "ACCA_LongTerm",
-    "ACCA_P1,2,4,7": "ACCA_P1,2,4,7",
-    "DCwACver_P1-7": "DCwACver_P1-7",
-}
+from core.case_finder import scan_folder, TARGET_PATTERNS
+from core.case_processor import process_case
 
 
 class CaseProcessingTab(ttk.Frame):
+    """
+    GUI tab for:
+      - Single case processing
+      - Folder scan + processing of the 3 ACCA/DC cases
+
+    Heavy lifting lives in core.case_finder + core.case_processor.
+    """
+
     def __init__(self, master):
         super().__init__(master)
 
-        # Logs in this tab still shown locally
+        # local log widget
         self.local_log = None
 
-        # External logger (Logs tab)
+        # External logger (e.g. Logs tab); app.py can wire this up
         self.external_log_func = None
 
         self.pwb_path = tk.StringVar(value="No .pwb file selected")
         self.folder_path = tk.StringVar(value="No folder selected")
 
+        # For folder mode: label -> full path
         self.target_cases = {}
 
+        # Checkbox for LimViolID max filter (default ON)
         self.max_filter_var = tk.BooleanVar(value=True)
 
         self._build_gui()
 
-    def log(self, msg):
-        """Logs to log window inside this tab AND to global Logs tab."""
-        if self.local_log:
+    # ───────────── Logging helper ───────────── #
+
+    def log(self, msg: str):
+        """Write to local log and external log (if connected)."""
+        if self.local_log is not None:
             self.local_log.insert(tk.END, msg + "\n")
             self.local_log.see(tk.END)
 
         if self.external_log_func:
             self.external_log_func(msg)
 
-    # ---------------- GUI ---------------- #
+    # ───────────── GUI layout ───────────── #
 
     def _build_gui(self):
-        # Top frame
+        # Top frame: single-case controls
         top = ttk.LabelFrame(self, text="Single case processing")
-        top.pack(fill=tk.X, padx=10, pady=10)
+        top.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
 
         ttk.Label(top, text="Selected .pwb case:").grid(row=0, column=0, sticky="w")
         ttk.Label(top, textvariable=self.pwb_path, width=80).grid(
             row=1, column=0, columnspan=2, sticky="w"
         )
 
-        browse_btn = ttk.Button(top, text="Browse .pwb…", command=self.browse_pwb)
-        browse_btn.grid(row=1, column=2)
-
-        run_btn = ttk.Button(
-            top, text="Process selected .pwb", command=self.run_export_single
+        ttk.Button(top, text="Browse .pwb…", command=self.browse_pwb).grid(
+            row=1, column=2, padx=(5, 0)
         )
-        run_btn.grid(row=2, column=0, pady=6, sticky="w")
 
-        # Folder area
-        folder = ttk.LabelFrame(self, text="Folder processing")
-        folder.pack(fill=tk.X, padx=10, pady=5)
+        ttk.Button(
+            top,
+            text="Process selected .pwb (export + filter)",
+            command=self.run_export_single,
+        ).grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
+
+        # Folder frame: folder selection + tree
+        folder = ttk.LabelFrame(self, text="Folder processing (3 ACCA/DC cases)")
+        folder.pack(side=tk.TOP, fill=tk.BOTH, expand=False, padx=10, pady=5)
 
         ttk.Label(folder, text="Selected folder:").grid(row=0, column=0, sticky="w")
         ttk.Label(folder, textvariable=self.folder_path, width=80).grid(
@@ -78,28 +80,31 @@ class CaseProcessingTab(ttk.Frame):
         )
 
         ttk.Button(folder, text="Browse folder…", command=self.browse_folder).grid(
-            row=1, column=2
+            row=1, column=2, padx=(5, 0)
         )
 
         ttk.Button(
             folder,
-            text="Process ACCA/DC cases in folder",
+            text="Process 3 ACCA/DC cases in folder",
             command=self.run_export_folder,
-        ).grid(row=2, column=0, pady=5, sticky="w")
+        ).grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
 
-        # Tree for folder preview
+        # Tree view for folder contents
         tree_frame = ttk.Frame(folder)
         tree_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
         folder.rowconfigure(3, weight=1)
         folder.columnconfigure(0, weight=1)
 
         self.case_tree = ttk.Treeview(
-            tree_frame, columns=("file", "type"), show="headings", height=8
+            tree_frame,
+            columns=("file", "type"),
+            show="headings",
+            height=8,
         )
         self.case_tree.heading("file", text="File name")
-        self.case_tree.heading("type", text="Type")
-        self.case_tree.column("file", width=500)
-        self.case_tree.column("type", width=180)
+        self.case_tree.heading("type", text="Case type")
+        self.case_tree.column("file", width=500, anchor="w")
+        self.case_tree.column("type", width=180, anchor="w")
         self.case_tree.tag_configure("target", foreground="blue")
 
         tree_scroll = ttk.Scrollbar(
@@ -109,24 +114,140 @@ class CaseProcessingTab(ttk.Frame):
         self.case_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Filters
+        # Filters frame
         filters = ttk.LabelFrame(self, text="Filters")
-        filters.pack(fill=tk.X, padx=10, pady=5)
+        filters.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(4, 4))
 
         ttk.Checkbutton(
             filters,
-            text="Deduplicate LimViolID (max LimViolPct)",
+            text="Deduplicate LimViolID (keep row(s) with max LimViolPct)",
             variable=self.max_filter_var,
-        ).pack(anchor="w")
+        ).pack(anchor="w", padx=5, pady=2)
 
-        # Log box
-        log_frame = ttk.LabelFrame(self, text="Local Log")
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Local log box
+        log_frame = ttk.LabelFrame(self, text="Case Processing Log")
+        log_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        self.local_log = tk.Text(log_frame, height=10)
-        self.local_log.pack(fill=tk.BOTH, expand=True)
+        self.local_log = tk.Text(log_frame, wrap="word", height=10)
+        self.local_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    # ---------------- Functionality (SAME AS BEFORE) ---------------- #
+        log_scroll = ttk.Scrollbar(
+            log_frame, orient="vertical", command=self.local_log.yview
+        )
+        self.local_log.configure(yscrollcommand=log_scroll.set)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # everything below is identical to your working logic: browse_pwb, browse_folder,
-    # scanning, row-filter, dedup filter, column blacklist, filtered CSV saving …
+    # ───────────── Single-case callbacks ───────────── #
+
+    def browse_pwb(self):
+        path = filedialog.askopenfilename(
+            title="Select PowerWorld case (.pwb)",
+            filetypes=[("PowerWorld case", "*.pwb"), ("All files", "*.*")],
+        )
+        if path:
+            self.pwb_path.set(path)
+            self.log(f"Selected case: {path}")
+
+    def run_export_single(self):
+        pwb = self.pwb_path.get()
+        if not pwb.lower().endswith(".pwb") or not os.path.exists(pwb):
+            messagebox.showwarning(
+                "No case selected", "Please select a valid .pwb file."
+            )
+            return
+
+        self.log("\n=== Processing single case ===")
+        try:
+            filtered_csv = process_case(
+                pwb, dedup_enabled=self.max_filter_var.get(), log_func=self.log
+            )
+        except Exception as e:
+            self.log(f"ERROR: {e}")
+            messagebox.showerror("Error", str(e))
+            return
+
+        if filtered_csv:
+            messagebox.showinfo(
+                "Done", f"Processing complete.\nFiltered CSV:\n{filtered_csv}"
+            )
+        else:
+            messagebox.showwarning(
+                "Done", "Processing finished, but no filtered CSV was created."
+            )
+
+    # ───────────── Folder callbacks ───────────── #
+
+    def browse_folder(self):
+        folder = filedialog.askdirectory(title="Select folder containing .pwb cases")
+        if not folder:
+            return
+
+        self.folder_path.set(folder)
+        self._scan_and_display_folder(folder)
+
+    def _scan_and_display_folder(self, folder: str):
+        """Use core.case_finder to scan folder and update tree view."""
+        self.case_tree.delete(*self.case_tree.get_children())
+        self.target_cases = {}
+
+        cases, target_cases = scan_folder(folder, self.log)
+        self.target_cases = target_cases
+
+        for info in cases:
+            tag = "target" if info["is_target"] else ""
+            self.case_tree.insert(
+                "",
+                "end",
+                values=(info["filename"], info["type"]),
+                tags=(tag,) if tag else (),
+            )
+
+    def run_export_folder(self):
+        folder = self.folder_path.get()
+        if not os.path.isdir(folder):
+            messagebox.showwarning(
+                "No folder selected", "Please select a valid folder."
+            )
+            return
+
+        if not self.target_cases:
+            messagebox.showwarning(
+                "No target cases found",
+                "No ACCA_LongTerm / ACCA_P1,2,4,7 / DCwACver_P1-7 cases detected.",
+            )
+            return
+
+        self.log("\n=== Batch processing ACCA/DC cases in folder ===")
+
+        errors = []
+        for label in TARGET_PATTERNS:
+            pwb_path = self.target_cases.get(label)
+            if not pwb_path:
+                self.log(f"Skipping type [{label}] (not found).")
+                continue
+
+            self.log(f"\n--- Processing [{label}] case ---")
+            self.log(f"Case path: {pwb_path}")
+            try:
+                filtered_csv = process_case(
+                    pwb_path,
+                    dedup_enabled=self.max_filter_var.get(),
+                    log_func=self.log,
+                )
+                if not filtered_csv:
+                    raise RuntimeError("No filtered CSV was created.")
+            except Exception as e:
+                msg = f"ERROR processing [{label}] case: {e}"
+                self.log(msg)
+                errors.append(msg)
+
+        if errors:
+            messagebox.showerror(
+                "Batch processing completed with errors",
+                "Some cases failed. Check the log window for details.",
+            )
+        else:
+            messagebox.showinfo(
+                "Batch processing complete",
+                "All detected ACCA/DC cases in the folder have been processed.",
+            )
