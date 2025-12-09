@@ -1,5 +1,3 @@
-# gui/tab_case.py
-
 import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -14,7 +12,7 @@ class CaseProcessingTab(ttk.Frame):
     GUI tab for:
       - Single case processing
       - Folder scan + processing of ACCA/DC cases
-      - (NEW) Multi-folder mode: each subfolder is a scenario to compare
+      - Multi-folder mode: each subfolder is a scenario to compare
     """
 
     def __init__(self, master):
@@ -30,10 +28,10 @@ class CaseProcessingTab(ttk.Frame):
         self.target_cases = {}
 
         # Filter options
-        self.max_filter_var = tk.BooleanVar(value=True)       # dedup
-        self.branch_mva_var = tk.BooleanVar(value=True)       # include Branch MVA
-        self.bus_lv_var = tk.BooleanVar(value=False)          # include Bus Low Volts
-        self.delete_original_var = tk.BooleanVar(value=False) # delete unfiltered CSV
+        self.max_filter_var = tk.BooleanVar(value=True)        # dedup
+        self.branch_mva_var = tk.BooleanVar(value=True)        # include Branch MVA
+        self.bus_lv_var = tk.BooleanVar(value=False)           # include Bus Low Volts
+        self.delete_original_var = tk.BooleanVar(value=False)  # delete unfiltered CSV
 
         self._build_gui()
 
@@ -157,6 +155,7 @@ class CaseProcessingTab(ttk.Frame):
     # ───────────── Helpers ───────────── #
 
     def _get_row_filter_categories(self):
+        """Return set of LimViolCat values to keep."""
         cats = set()
         if self.branch_mva_var.get():
             cats.add("Branch MVA")
@@ -220,22 +219,22 @@ class CaseProcessingTab(ttk.Frame):
             return
 
         self.folder_path.set(folder)
-        # For immediate feedback, just scan this folder's own .pwb files.
+        # For immediate feedback, just scan this folder's own .pwb files or subfolders.
         self._scan_and_display_folder(folder)
 
     def _scan_and_display_folder(self, folder: str):
-        """Preview .pwb files directly in this folder.
+        """
+        Preview .pwb files directly in this folder.
         If there are no .pwb files but there ARE subfolders, show those instead.
         """
         self.case_tree.delete(*self.case_tree.get_children())
         self.target_cases = {}
 
-        # First: look for .pwb files directly in this folder
+        # Look for .pwb files directly in this folder
         cases, target_cases = scan_folder(folder, self.log)
         self.target_cases = target_cases
 
         if cases:
-            # Normal behaviour: show .pwb files
             for info in cases:
                 tag = "target" if info["is_target"] else ""
                 self.case_tree.insert(
@@ -253,7 +252,6 @@ class CaseProcessingTab(ttk.Frame):
         )
 
         if not subdirs:
-            # Truly nothing to show
             self.log("No .pwb files or subfolders found in this folder.")
             return
 
@@ -268,7 +266,37 @@ class CaseProcessingTab(ttk.Frame):
                 values=(d, "Scenario subfolder"),
             )
 
-    # ---------- Single-folder (old behaviour) ---------- #
+    def run_export_folder(self):
+        root = self.folder_path.get()
+        if not os.path.isdir(root):
+            messagebox.showwarning(
+                "No folder selected", "Please select a valid folder."
+            )
+            return
+
+        cats = self._get_row_filter_categories()
+        if not cats:
+            self.log(
+                "WARNING: No LimViolCat categories selected. Row filter will be skipped."
+            )
+
+        # Look for subfolders inside the root folder.
+        subdirs = sorted(
+            d for d in os.listdir(root)
+            if os.path.isdir(os.path.join(root, d))
+        )
+
+        if subdirs:
+            # Multi-folder mode: each subfolder is a scenario
+            self._run_export_multi_folder(root, subdirs, cats)
+        else:
+            # Single-folder mode: just this folder with 3 cases
+            # Refresh target_cases in case the user changed folders after browsing
+            _, target_cases = scan_folder(root, self.log)
+            self.target_cases = target_cases
+            self._run_export_single_folder(root, cats)
+
+    # ---------- Single-folder mode ---------- #
 
     def _run_export_single_folder(self, folder: str, cats):
         if not self.target_cases:
@@ -315,7 +343,7 @@ class CaseProcessingTab(ttk.Frame):
                 "All detected ACCA/DC cases in the folder have been processed.",
             )
 
-    # ---------- Multi-folder mode (NEW) ---------- #
+    # ---------- Multi-folder mode ---------- #
 
     def _run_export_multi_folder(self, root: str, subdirs, cats):
         self.log(
@@ -331,7 +359,7 @@ class CaseProcessingTab(ttk.Frame):
             scenario_folder = os.path.join(root, sub)
             self.log(f"\n=== Processing scenario folder: {sub} ===")
 
-            cases, target_cases = scan_folder(scenario_folder, self.log)
+            _, target_cases = scan_folder(scenario_folder, self.log)
             if not target_cases:
                 self.log(f"  [{sub}] No ACCA/DC cases found; skipping.")
                 continue
