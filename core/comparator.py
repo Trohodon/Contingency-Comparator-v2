@@ -4,8 +4,10 @@
 # Combined_ViolationCTG_Comparison.xlsx workbook.
 #
 # - list_sheets(workbook_path)
-# - build_case_type_comparison(...)   -> DF for GUI split-screen (per case type)
-# - compare_scenarios(...)            -> writes a comparison sheet back to workbook
+# - build_case_type_comparison(...)
+# - compare_scenarios(...)
+# - build_pair_comparison_df(...)
+# - build_batch_comparison_workbook(...)
 #
 # Sheet layout assumptions:
 #   Each scenario sheet is formatted by comparison_builder and contains
@@ -21,12 +23,10 @@
 # Internally we convert this to:
 #   CaseType, CTGLabel, LimViolID, LimViolValue, LimViolPct
 #
-# where CaseType is one of the canonical strings:
-#   "ACCA_LongTerm", "ACCA_P1,2,4,7", "DCwACver_P1-7"
-#
 
-from typing import Iterable, List, Dict, Optional
+from typing import Iterable, List, Dict, Optional, Sequence, Tuple
 
+import math
 import os
 import pandas as pd
 
@@ -54,6 +54,13 @@ CASE_TYPES_CANONICAL: List[str] = [
     "ACCA_P1,2,4,7",
     "DCwACver_P1-7",
 ]
+
+# Reverse mapping so we can label rows nicely when exporting
+CANONICAL_TO_PRETTY = {
+    "ACCA_LongTerm": "ACCA LongTerm",
+    "ACCA_P1,2,4,7": "ACCA",
+    "DCwACver_P1-7": "DCwAC",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -453,3 +460,211 @@ def compare_scenarios(
         log_func(f"Comparison sheet '{comp_name}' written to workbook.")
 
     return workbook_path
+
+
+# ---------------------------------------------------------------------------
+# Batch export helpers for the build-list queue
+# ---------------------------------------------------------------------------
+
+
+def _is_nan(x) -> bool:
+    return isinstance(x, float) and math.isnan(x)
+
+
+def build_pair_comparison_df(
+    workbook_path: str,
+    left_sheet: str,
+    right_sheet: str,
+    threshold: float,
+    log_func=None,
+) -> pd.DataFrame:
+    """
+    Build a single flat DataFrame for one (left_sheet, right_sheet) pair,
+    combining all case types.
+
+    Columns:
+      CaseType, Contingency, ResultingIssue, LeftPct, RightPct, DeltaDisplay
+
+    Threshold logic matches the GUI:
+      - if BOTH Left% and Right% exist and are < threshold -> row is skipped
+      - if only Left% exists -> kept only if Left% >= threshold
+      - if only Right% exists -> kept only if Right% >= threshold
+
+    DeltaDisplay:
+      - "Only in left"   (only left present)
+      - "Only in right"  (only right present)
+      - ""               (neither present, but that should be rare)
+      - numeric string   (Right - Left, 2 decimals)
+    """
+    records: List[Dict] = []
+
+    for case_type in CASE_TYPES_CANONICAL:
+        pretty = CANONICAL_TO_PRETTY.get(case_type, case_type)
+
+        df = build_case_type_comparison(
+            workbook_path,
+            base_sheet=left_sheet,
+            new_sheet=right_sheet,
+            case_type=case_type,
+            max_rows=None,
+            log_func=log_func,
+        )
+
+        if df.empty:
+            continue
+
+        if log_func:
+            log_func(
+                f"  Pair {left_sheet} vs {right_sheet} | {pretty}: raw rows={len(df)}"
+            )
+
+        for _, row in df.iterrows():
+            cont = str(row.get("Contingency", "") or "")
+            issue = str(row.get("ResultingIssue", "") or "")
+            left_pct = row.get("LeftPct", math.nan)
+            right_pct = row.get("RightPct", math.nan)
+            delta_pct = row.get("DeltaPct", math.nan)
+
+            values = []
+            if not _is_nan(left_pct):
+                values.append(float(left_pct))
+            if not _is_nan(right_pct):
+                values.append(float(right_pct))
+
+            if not values:
+                # truly empty
+                continue
+
+            max_val = max(values)
+            if max_val < threshold:
+                # below threshold on both sides
+                continue
+
+            # Decide DeltaDisplay text
+            if _is_nan(left_pct) and not _is_nan(right_pct):
+                delta_text = "Only in right"
+            elif not _is_nan(left_pct) and _is_nan(right_pct):
+                delta_text = "Only in left"
+            elif _is_nan(left_pct) and _is_nan(right_pct):
+                delta_text = ""
+            else:
+                try:
+                    delta_text = f"{float(delta_pct):.2f}"
+                except Exception:
+                    delta_text = str(delta_pct)
+
+            records.append(
+                {
+                    "CaseType": pretty,
+                    "Contingency": cont,
+                    "ResultingIssue": issue,
+                    "LeftPct": float(left_pct) if not _is_nan(left_pct) else None,
+                    "RightPct": float(right_pct) if not _is_nan(right_pct) else None,
+                    "DeltaDisplay": delta_text,
+                }
+            )
+
+    df_all = pd.DataFrame.from_records(records)
+
+    # To keep ordering nice: sort by CaseType groups, and within each group,
+    # by max(LeftPct, RightPct) descending
+    if not df_all.empty:
+        sort_vals = df_all[["LeftPct", "RightPct"]].max(axis=1)
+        df_all["_SortKey"] = sort_vals
+        df_all = df_all.sort_values(
+            by=["CaseType", "_SortKey"], ascending=[True, False], na_position="last"
+        ).drop(columns=["_SortKey"])
+
+    return df_all
+
+
+def _sanitize_sheet_name(name: str) -> str:
+    """
+    Make a string safe to use as an Excel sheet name.
+    """
+    invalid = set(r'[]:*?/\\')
+    cleaned = "".join(ch if ch not in invalid else "_" for ch in name)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        cleaned = "Sheet"
+
+    # Excel limit
+    return cleaned[:31]
+
+
+def build_batch_comparison_workbook(
+    src_workbook: str,
+    pairs: Sequence[Tuple[str, str]],
+    threshold: float,
+    output_path: str,
+    log_func=None,
+) -> str:
+    """
+    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair.
+
+    Each sheet contains rows for all case types with columns:
+      CaseType, Contingency, ResultingIssue, LeftPct, RightPct, DeltaDisplay
+
+    threshold is the same loading threshold used by the GUI.
+
+    Returns output_path.
+    """
+    if log_func:
+        log_func(
+            f"\n=== Building batch comparison workbook ===\n"
+            f"Source: {src_workbook}\n"
+            f"Output: {output_path}\n"
+            f"Threshold: {threshold:.2f}%\n"
+        )
+
+    if not pairs:
+        raise ValueError("No comparison pairs provided.")
+
+    # Create new workbook via pandas
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        used_names: set[str] = set()
+
+        for idx, (left_sheet, right_sheet) in enumerate(pairs, start=1):
+            if log_func:
+                log_func(
+                    f"Processing pair {idx}: '{left_sheet}' vs '{right_sheet}'..."
+                )
+
+            df_pair = build_pair_comparison_df(
+                src_workbook, left_sheet, right_sheet, threshold, log_func=log_func
+            )
+
+            if df_pair.empty:
+                # Still create a sheet with a simple message
+                df_pair = pd.DataFrame(
+                    [
+                        {
+                            "CaseType": "",
+                            "Contingency": "No rows above threshold.",
+                            "ResultingIssue": "",
+                            "LeftPct": None,
+                            "RightPct": None,
+                            "DeltaDisplay": "",
+                        }
+                    ]
+                )
+
+            # Sheet name: e.g. "Base_vs_Test1"
+            base_name = f"{left_sheet}_vs_{right_sheet}"
+            base_name = _sanitize_sheet_name(base_name)
+
+            # Ensure uniqueness
+            name = base_name
+            counter = 2
+            while name in used_names:
+                suffix = f"_{counter}"
+                name = _sanitize_sheet_name(base_name[: (31 - len(suffix))] + suffix)
+                counter += 1
+            used_names.add(name)
+
+            df_pair.to_excel(writer, sheet_name=name, index=False)
+
+    if log_func:
+        log_func(f"Batch comparison workbook written to:\n{output_path}")
+
+    return output_path
