@@ -23,8 +23,7 @@ PRETTY_CASE_NAMES = {
 def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
     """
     Fallback: simple one-sheet-per-scenario workbook, no fancy formatting.
-    This is basically what you already had, but kept as backup if openpyxl
-    is not installed.
+    This is basically the original tabular export.
     """
     if not folder_to_case_csvs:
         if log_func:
@@ -163,32 +162,31 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
         bottom=Side(style="thin"),
     )
 
-    # Columns we care about
-    # (If LimViolID isn't present for some reason, we'll drop that column.)
+    # Build each scenario sheet
     for folder_name, df in scenario_data.items():
-        # Make sure columns exist
+        # Sanity check columns
         required = ["CaseType", "CTGLabel", "LimViolValue", "LimViolPct"]
         for col in required:
-            if col not in df.columns:
-                if log_func:
-                    log_func(f"  [{folder_name}] WARNING: column '{col}' missing.")
+            if col not in df.columns and log_func:
+                log_func(f"  [{folder_name}] WARNING: column '{col}' missing.")
+
         has_limviolid = "LimViolID" in df.columns
 
-        # Create sheet for this scenario
+        # Create sheet
         sheet_name = (folder_name or "Sheet").strip()[:31]
         if not sheet_name:
             sheet_name = "Sheet"
         ws = wb.create_sheet(title=sheet_name)
 
-        # Set some reasonable column widths
-        ws.column_dimensions["B"].width = 60  # Contingency Events
-        ws.column_dimensions["D"].width = 60  # Resulting Issue
-        ws.column_dimensions["F"].width = 18  # MVA
-        ws.column_dimensions["G"].width = 18  # Percent
-        ws.column_dimensions["H"].width = 16  # Case Type
+        # Set column widths
+        ws.column_dimensions["B"].width = 55  # Contingency Events
+        ws.column_dimensions["D"].width = 55  # Resulting Issue
+        ws.column_dimensions["F"].width = 18  # Contingency Value (MVA)
+        ws.column_dimensions["G"].width = 18  # Percent Loading
 
         current_row = 1
 
+        # Process blocks in fixed order: ACCA_LongTerm, ACCA_P1,2,4,7, DCwACver_P1-7
         for label in TARGET_PATTERNS:
             block_df = df[df["CaseType"] == label]
             if block_df.empty:
@@ -196,84 +194,79 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
 
             pretty_name = PRETTY_CASE_NAMES.get(label, label)
 
-            # ---- Title row (blue bar with case type name) ----
-            # Merge B:H for title
-            ws.merge_cells(start_row=current_row, start_column=2,
-                           end_row=current_row, end_column=8)
-            cell = ws.cell(row=current_row, column=2)
-            cell.value = pretty_name
-            cell.fill = title_fill
-            cell.font = title_font
-            cell.alignment = center
-            for col in range(2, 9):
+            # ===== Title row =====
+            # Merge B:G for the title
+            ws.merge_cells(
+                start_row=current_row,
+                start_column=2,
+                end_row=current_row,
+                end_column=7,
+            )
+            c = ws.cell(row=current_row, column=2)
+            c.value = pretty_name
+            c.fill = title_fill
+            c.font = title_font
+            c.alignment = center
+            for col in range(2, 8):
                 ws.cell(row=current_row, column=col).border = thin_border
 
             current_row += 1
 
-            # ---- Header row ----
+            # ===== Header row =====
             headers = [
                 ("B", "Contingency Events"),
                 ("D", "Resulting Issue"),
                 ("F", "Contingency Value (MVA)"),
                 ("G", "Percent Loading"),
-                ("H", "Case Type"),
             ]
+
             for col_letter, text in headers:
                 col_idx = ord(col_letter) - ord("A") + 1
-                c = ws.cell(row=current_row, column=col_idx)
-                c.value = text
-                c.fill = header_fill
-                c.font = header_font
-                c.alignment = center
-                c.border = thin_border
+                hc = ws.cell(row=current_row, column=col_idx)
+                hc.value = text
+                hc.fill = header_fill
+                hc.font = header_font
+                hc.alignment = center
+                hc.border = thin_border
 
             current_row += 1
 
-            # ---- Data rows ----
+            # ===== Data rows =====
             for _, row in block_df.iterrows():
-                # B: Contingency Events (CTGLabel)
+                # Contingency Events
                 c = ws.cell(row=current_row, column=2)
                 c.value = row.get("CTGLabel", "")
                 c.font = data_font
                 c.alignment = left_align
                 c.border = thin_border
 
-                # D: Resulting Issue (LimViolID if available)
+                # Resulting Issue
                 c = ws.cell(row=current_row, column=4)
-                if has_limviolid:
-                    c.value = row.get("LimViolID", "")
-                else:
-                    c.value = ""
+                c.value = row.get("LimViolID", "") if has_limviolid else ""
                 c.font = data_font
                 c.alignment = left_align
                 c.border = thin_border
 
-                # F: Contingency Value (MVA) (LimViolValue)
+                # Contingency Value (MVA)
                 c = ws.cell(row=current_row, column=6)
                 c.value = row.get("LimViolValue", "")
                 c.font = data_font
                 c.alignment = center
                 c.border = thin_border
 
-                # G: Percent Loading (LimViolPct)
+                # Percent Loading
                 c = ws.cell(row=current_row, column=7)
                 c.value = row.get("LimViolPct", "")
                 c.font = data_font
                 c.alignment = center
                 c.border = thin_border
 
-                # H: Case Type
-                c = ws.cell(row=current_row, column=8)
-                c.value = label
-                c.font = data_font
-                c.alignment = center
-                c.border = thin_border
-
                 current_row += 1
 
-            # Blank row between blocks
-            current_row += 2
+            # One blank row between blocks
+            current_row += 1
 
+    # Save workbook
     try:
         wb.save(workbook_path)
     except Exception as e:
