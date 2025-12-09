@@ -12,7 +12,7 @@ Central place for:
 # ───────────────────────────────────────
 
 BLACKLIST_BASE_NAMES = {
-    # Your existing base-name blacklist goes here:
+    # Your base-name blacklist:
     "BusNum",
     "BusName",
     "BusNomVolt",
@@ -54,15 +54,18 @@ def apply_blacklist(df):
 # ROW FILTER LOGIC (LimViolCat)
 # ───────────────────────────────────────
 
-# Only keep rows where LimViolCat == "Branch MVA"
 ROW_FILTER_ENABLED = True
 ROW_FILTER_COLUMN = "LimViolCat"
-ROW_FILTER_KEEP_VALUES = {"Branch MVA"}  # everything else is dropped
+# Default if GUI doesn't specify anything:
+ROW_FILTER_KEEP_VALUES = {"Branch MVA"}
 
 
-def apply_row_filter(df, log_func=None):
+def apply_row_filter(df, keep_values=None, log_func=None):
     """
-    Filter out rows that don't match ROW_FILTER_KEEP_VALUES.
+    Filter out rows that don't match keep_values for LimViolCat.
+    keep_values: iterable of category strings (e.g. {"Branch MVA", "Bus Low Volts"})
+                 If None, falls back to ROW_FILTER_KEEP_VALUES.
+                 If empty set/list, row filter is skipped.
     Return (filtered_df, removed_count).
     """
     if not ROW_FILTER_ENABLED:
@@ -73,8 +76,18 @@ def apply_row_filter(df, log_func=None):
             log_func(f"WARNING: Row filter column '{ROW_FILTER_COLUMN}' not found.")
         return df, 0
 
+    if keep_values is None:
+        keep_values = ROW_FILTER_KEEP_VALUES
+
+    keep_values = set(keep_values)
+
+    if not keep_values:
+        if log_func:
+            log_func("Row filter disabled: no LimViolCat categories selected.")
+        return df, 0
+
     before = len(df)
-    filtered_df = df[df[ROW_FILTER_COLUMN].isin(ROW_FILTER_KEEP_VALUES)].copy()
+    filtered_df = df[df[ROW_FILTER_COLUMN].isin(keep_values)].copy()
     after = len(filtered_df)
     removed = before - after
 
@@ -93,8 +106,6 @@ def apply_limviolid_max_filter(df, log_func=None):
     """
     For each LimViolID, keep only the row(s) with the highest LimViolPct.
     Return (filtered_df, removed_count).
-
-    If LimViolID or LimViolPct is missing, does nothing.
     """
     if DEDUP_ID_COLUMN not in df.columns or DEDUP_VALUE_COLUMN not in df.columns:
         if log_func:
@@ -106,7 +117,6 @@ def apply_limviolid_max_filter(df, log_func=None):
 
     before = len(df)
 
-    # Compute max LimViolPct per LimViolID
     try:
         max_per_id = df.groupby(DEDUP_ID_COLUMN)[DEDUP_VALUE_COLUMN].transform("max")
     except Exception as e:
