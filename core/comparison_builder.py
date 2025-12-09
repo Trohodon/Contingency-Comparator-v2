@@ -23,7 +23,6 @@ PRETTY_CASE_NAMES = {
 def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
     """
     Fallback: simple one-sheet-per-scenario workbook, no fancy formatting.
-    This is basically the original tabular export.
     """
     if not folder_to_case_csvs:
         if log_func:
@@ -86,7 +85,7 @@ def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
 def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
     """
     Build a combined Excel workbook with one sheet per subfolder, formatted
-    to look like your manual comparison sheet.
+    like the manual comparison sheet.
 
     If openpyxl is not available, falls back to a simple table layout.
     """
@@ -178,11 +177,11 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
             sheet_name = "Sheet"
         ws = wb.create_sheet(title=sheet_name)
 
-        # Set column widths
+        # Set column widths – contiguous columns B to E
         ws.column_dimensions["B"].width = 55  # Contingency Events
-        ws.column_dimensions["D"].width = 55  # Resulting Issue
-        ws.column_dimensions["F"].width = 18  # Contingency Value (MVA)
-        ws.column_dimensions["G"].width = 18  # Percent Loading
+        ws.column_dimensions["C"].width = 55  # Resulting Issue
+        ws.column_dimensions["D"].width = 18  # Contingency Value (MVA)
+        ws.column_dimensions["E"].width = 18  # Percent Loading
 
         current_row = 1
 
@@ -195,19 +194,19 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
             pretty_name = PRETTY_CASE_NAMES.get(label, label)
 
             # ===== Title row =====
-            # Merge B:G for the title
+            # Merge B:E for the title (no gaps between columns)
             ws.merge_cells(
                 start_row=current_row,
-                start_column=2,
+                start_column=2,  # B
                 end_row=current_row,
-                end_column=7,
+                end_column=5,    # E
             )
             c = ws.cell(row=current_row, column=2)
             c.value = pretty_name
             c.fill = title_fill
             c.font = title_font
             c.alignment = center
-            for col in range(2, 8):
+            for col in range(2, 6):
                 ws.cell(row=current_row, column=col).border = thin_border
 
             current_row += 1
@@ -215,9 +214,9 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
             # ===== Header row =====
             headers = [
                 ("B", "Contingency Events"),
-                ("D", "Resulting Issue"),
-                ("F", "Contingency Value (MVA)"),
-                ("G", "Percent Loading"),
+                ("C", "Resulting Issue"),
+                ("D", "Contingency Value (MVA)"),
+                ("E", "Percent Loading"),
             ]
 
             for col_letter, text in headers:
@@ -233,29 +232,29 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
 
             # ===== Data rows =====
             for _, row in block_df.iterrows():
-                # Contingency Events
+                # Contingency Events (B)
                 c = ws.cell(row=current_row, column=2)
                 c.value = row.get("CTGLabel", "")
                 c.font = data_font
                 c.alignment = left_align
                 c.border = thin_border
 
-                # Resulting Issue
-                c = ws.cell(row=current_row, column=4)
+                # Resulting Issue (C)
+                c = ws.cell(row=current_row, column=3)
                 c.value = row.get("LimViolID", "") if has_limviolid else ""
                 c.font = data_font
                 c.alignment = left_align
                 c.border = thin_border
 
-                # Contingency Value (MVA)
-                c = ws.cell(row=current_row, column=6)
+                # Contingency Value (MVA) (D)
+                c = ws.cell(row=current_row, column=4)
                 c.value = row.get("LimViolValue", "")
                 c.font = data_font
                 c.alignment = center
                 c.border = thin_border
 
-                # Percent Loading
-                c = ws.cell(row=current_row, column=7)
+                # Percent Loading (E)
+                c = ws.cell(row=current_row, column=5)
                 c.value = row.get("LimViolPct", "")
                 c.font = data_font
                 c.alignment = center
