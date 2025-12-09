@@ -1,5 +1,3 @@
-# core/comparison_builder.py
-
 import os
 import pandas as pd
 
@@ -31,8 +29,7 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
     if log_func:
         log_func(f"\nBuilding combined workbook:\n  {workbook_path}")
 
-    # Use ExcelWriter without forcing xlsxwriter.
-    # Pandas will pick a default engine (usually openpyxl).
+    # Use ExcelWriter without forcing xlsxwriter (so openpyxl can be used).
     try:
         writer = pd.ExcelWriter(workbook_path)
     except Exception as e:
