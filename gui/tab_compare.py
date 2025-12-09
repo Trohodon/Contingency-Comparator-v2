@@ -2,15 +2,16 @@
 
 import os
 import math
-from typing import Optional
+from typing import Optional, List, Tuple
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 from core.comparator import (
     list_sheets,
-    build_case_type_comparison,
+    build_case_type_comparison,   # still used for live view
     CASE_TYPES_CANONICAL,
+    build_batch_comparison_workbook,
 )
 
 
@@ -21,9 +22,13 @@ class CompareTab(ttk.Frame):
     - Open any Combined_ViolationCTG_Comparison.xlsx (or compatible workbook)
     - Choose left/right sheets
     - Set a percent-loading threshold (default 80%)
-    - For each case type (ACCA LongTerm, ACCA, DCwAC) show rows sorted
+    - Live view: for each case type (ACCA LongTerm, ACCA, DCwAC) show rows sorted
       highest-to-lowest by loading, with:
          Left %, Right %, Δ% (or 'Only in left/right' when unmatched)
+    - Build queue:
+         * "Add to queue": add current Left vs Right pair
+         * "Delete selected": remove pair from queue
+         * "Build queued workbook": write a new .xlsx containing one sheet per pair
     """
 
     CASE_TYPE_TABS = [
@@ -39,10 +44,10 @@ class CompareTab(ttk.Frame):
         self.left_sheet_var = tk.StringVar()
         self.right_sheet_var = tk.StringVar()
 
-        # New: percent loading threshold
+        # Percent loading threshold
         self.threshold_var = tk.StringVar(value="80")
 
-        self._sheets = []
+        self._sheets: List[str] = []
         self._is_running = False
 
         self.local_log: Optional[tk.Text] = None
@@ -50,6 +55,10 @@ class CompareTab(ttk.Frame):
 
         # One Treeview per canonical case type
         self._trees: dict[str, ttk.Treeview] = {}
+
+        # Queue of (left_sheet, right_sheet) pairs
+        self._queue: List[Tuple[str, str]] = []
+        self._queue_listbox: Optional[tk.Listbox] = None
 
         self._build_gui()
 
@@ -67,6 +76,9 @@ class CompareTab(ttk.Frame):
         state = "disabled" if running else "normal"
         self.open_btn.configure(state=state)
         self.compare_btn.configure(state=state)
+        self.add_btn.configure(state=state)
+        self.build_btn.configure(state=state)
+        self.delete_btn.configure(state=state)
         self.update_idletasks()
         self.update()
 
@@ -96,10 +108,11 @@ class CompareTab(ttk.Frame):
 
         wb_frame.columnconfigure(2, weight=1)
 
-        # Comparison controls
+        # Comparison controls + build queue
         cmp_frame = ttk.LabelFrame(self, text="Comparison")
         cmp_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 8))
 
+        # Row 0: sheet selection + add/compare buttons
         ttk.Label(cmp_frame, text="Left sheet:").grid(
             row=0, column=0, sticky="w", padx=5, pady=2
         )
@@ -116,15 +129,54 @@ class CompareTab(ttk.Frame):
         )
         self.right_combo.grid(row=0, column=3, sticky="w", padx=5, pady=2)
 
+        # Add to queue (to the left of Compare)
+        self.add_btn = ttk.Button(
+            cmp_frame, text="Add to queue", command=self.add_to_queue
+        )
+        self.add_btn.grid(row=0, column=4, sticky="w", padx=(10, 5), pady=2)
+
         self.compare_btn = ttk.Button(
             cmp_frame, text="Compare", command=self.run_comparison
         )
-        self.compare_btn.grid(row=0, column=4, sticky="w", padx=(10, 5), pady=2)
+        self.compare_btn.grid(row=0, column=5, sticky="w", padx=(5, 5), pady=2)
 
         cmp_frame.columnconfigure(1, weight=1)
         cmp_frame.columnconfigure(3, weight=1)
 
-        # Notebook for ACCA LongTerm / ACCA / DCwAC
+        # Row 1: queue list + delete/build buttons
+        ttk.Label(cmp_frame, text="Queued comparisons:").grid(
+            row=1, column=0, sticky="nw", padx=5, pady=(4, 4)
+        )
+
+        queue_frame = ttk.Frame(cmp_frame)
+        queue_frame.grid(row=1, column=1, columnspan=3, sticky="nsew", pady=(4, 4))
+
+        self._queue_listbox = tk.Listbox(queue_frame, height=4)
+        self._queue_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        q_scroll = ttk.Scrollbar(
+            queue_frame, orient="vertical", command=self._queue_listbox.yview
+        )
+        self._queue_listbox.configure(yscrollcommand=q_scroll.set)
+        q_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.delete_btn = ttk.Button(
+            cmp_frame, text="Delete selected", command=self.delete_selected_queue_item
+        )
+        self.delete_btn.grid(row=1, column=4, sticky="nw", padx=(10, 5), pady=(4, 4))
+
+        self.build_btn = ttk.Button(
+            cmp_frame,
+            text="Build queued workbook",
+            command=self.build_queued_workbook,
+        )
+        self.build_btn.grid(row=1, column=5, sticky="nw", padx=(5, 5), pady=(4, 4))
+
+        cmp_frame.rowconfigure(1, weight=1)
+        cmp_frame.columnconfigure(1, weight=1)
+        cmp_frame.columnconfigure(3, weight=1)
+
+        # Notebook for ACCA LongTerm / ACCA / DCwAC (live view)
         nb = ttk.Notebook(self)
         nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
 
@@ -170,7 +222,103 @@ class CompareTab(ttk.Frame):
         self.local_log.configure(yscrollcommand=log_scroll.set)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-    # ---------------- Callbacks ---------------- #
+    # ---------------- Queue helpers ---------------- #
+
+    def add_to_queue(self):
+        wb = self.workbook_path.get()
+        if not wb.lower().endswith(".xlsx") or not os.path.isfile(wb):
+            messagebox.showwarning(
+                "No workbook", "Please load a valid .xlsx workbook first."
+            )
+            return
+
+        left_sheet = self.left_sheet_var.get()
+        right_sheet = self.right_sheet_var.get()
+        if not left_sheet or not right_sheet:
+            messagebox.showwarning(
+                "No sheets selected", "Please select both left and right sheets."
+            )
+            return
+
+        pair = (left_sheet, right_sheet)
+        self._queue.append(pair)
+
+        display = f"{left_sheet}  vs  {right_sheet}"
+        self._queue_listbox.insert(tk.END, display)
+
+        self.log(f"Added to queue: {display}")
+
+    def delete_selected_queue_item(self):
+        if not self._queue_listbox:
+            return
+        sel = list(self._queue_listbox.curselection())
+        if not sel:
+            return
+        # delete from end to start so indices stay valid
+        for idx in reversed(sel):
+            self._queue_listbox.delete(idx)
+            if 0 <= idx < len(self._queue):
+                removed = self._queue.pop(idx)
+                self.log(f"Removed from queue: {removed[0]} vs {removed[1]}")
+
+    def build_queued_workbook(self):
+        if not self._queue:
+            messagebox.showinfo("Empty queue", "No comparisons in the build queue.")
+            return
+
+        wb = self.workbook_path.get()
+        if not wb.lower().endswith(".xlsx") or not os.path.isfile(wb):
+            messagebox.showwarning(
+                "No workbook", "Please load a valid .xlsx workbook first."
+            )
+            return
+
+        # Threshold
+        try:
+            thr_raw = self.threshold_var.get().strip()
+            threshold = float(thr_raw) if thr_raw else 0.0
+            if threshold < 0:
+                threshold = 0.0
+        except ValueError:
+            messagebox.showwarning(
+                "Invalid threshold",
+                "Percent loading threshold must be a number (e.g. 80).",
+            )
+            return
+
+        # Default save folder = folder of source workbook
+        initial_dir = os.path.dirname(wb) if os.path.dirname(wb) else "."
+        save_path = filedialog.asksaveasfilename(
+            title="Save batch comparison workbook",
+            defaultextension=".xlsx",
+            initialdir=initial_dir,
+            initialfile="Batch_Comparison.xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+        )
+        if not save_path:
+            return
+
+        try:
+            self._set_running(True)
+            build_batch_comparison_workbook(
+                src_workbook=wb,
+                pairs=self._queue,
+                threshold=threshold,
+                output_path=save_path,
+                log_func=self.log,
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to build workbook:\n{e}")
+            self.log(f"ERROR building batch workbook: {e}")
+        finally:
+            self._set_running(False)
+
+        messagebox.showinfo(
+            "Batch workbook created",
+            f"Batch comparison workbook created at:\n{save_path}",
+        )
+
+    # ---------------- Main compare callbacks ---------------- #
 
     def browse_workbook(self):
         path = filedialog.askopenfilename(
