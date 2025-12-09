@@ -582,7 +582,8 @@ def _sanitize_sheet_name(name: str) -> str:
 
 def _apply_table_styles(ws: Worksheet):
     """
-    Set reasonable column widths and freeze panes for a formatted comparison sheet.
+    Set reasonable column widths for a formatted comparison sheet.
+    (No frozen panes – normal scrolling.)
     """
     widths = {
         2: 45,  # B: Contingency
@@ -594,8 +595,8 @@ def _apply_table_styles(ws: Worksheet):
     for col_idx, width in widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    # Freeze panes below the first header block
-    ws.freeze_panes = "B4"
+    # No freeze panes: scroll normally
+    # ws.freeze_panes = "B4"
 
 
 # Styles (approximate the blue style from the first tab)
@@ -615,7 +616,7 @@ CELL_ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=
 
 def _write_formatted_pair_sheet(
     wb: Workbook,
-    sheet_name: str,
+    ws_name: str,
     df_pair: pd.DataFrame,
 ):
     """
@@ -630,7 +631,7 @@ def _write_formatted_pair_sheet(
                       F: Δ% (Right - Left) / Status
         [Data rows]   grouped by case type, with a blank row between blocks.
     """
-    ws = wb.create_sheet(title=sheet_name)
+    ws = wb.create_sheet(title=ws_name)
     _apply_table_styles(ws)
 
     if df_pair.empty:
@@ -767,18 +768,20 @@ def build_batch_comparison_workbook(
                 ]
             )
 
-        # Sheet name: e.g. "Base_vs_Test1"
-        base_name = f"{left_sheet}_vs_{right_sheet}"
+        # Sheet name: prefix with index so it always matches the queue/log order
+        # Example: "01_Base Case_vs_Breaker Test 1"
+        base_name = f"{idx:02d}_{left_sheet}_vs_{right_sheet}"
         base_name = _sanitize_sheet_name(base_name)
 
         name = base_name
         counter = 2
         while name in used_names:
+            # If a duplicate somehow occurs, append a small numeric suffix
             suffix = f"_{counter}"
             name = _sanitize_sheet_name(base_name[: (31 - len(suffix))] + suffix)
             counter += 1
-        used_names.add(name)
 
+        used_names.add(name)
         _write_formatted_pair_sheet(wb, name, df_pair)
 
     wb.save(output_path)
