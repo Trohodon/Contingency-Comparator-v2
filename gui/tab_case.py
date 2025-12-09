@@ -13,34 +13,30 @@ class CaseProcessingTab(ttk.Frame):
     GUI tab for:
       - Single case processing
       - Folder scan + processing of the 3 ACCA/DC cases
-
-    Heavy lifting lives in core.case_finder + core.case_processor.
     """
 
     def __init__(self, master):
         super().__init__(master)
 
-        # local log widget
         self.local_log = None
-
-        # External logger (e.g. Logs tab); app.py can wire this up
         self.external_log_func = None
 
         self.pwb_path = tk.StringVar(value="No .pwb file selected")
         self.folder_path = tk.StringVar(value="No folder selected")
 
-        # For folder mode: label -> full path
         self.target_cases = {}
 
-        # Checkbox for LimViolID max filter (default ON)
-        self.max_filter_var = tk.BooleanVar(value=True)
+        # Filter options
+        self.max_filter_var = tk.BooleanVar(value=True)      # existing
+        self.branch_mva_var = tk.BooleanVar(value=True)      # NEW – default ON
+        self.bus_lv_var = tk.BooleanVar(value=False)         # NEW – default OFF
+        self.delete_original_var = tk.BooleanVar(value=False)  # NEW – default OFF
 
         self._build_gui()
 
     # ───────────── Logging helper ───────────── #
 
     def log(self, msg: str):
-        """Write to local log and external log (if connected)."""
         if self.local_log is not None:
             self.local_log.insert(tk.END, msg + "\n")
             self.local_log.see(tk.END)
@@ -70,7 +66,7 @@ class CaseProcessingTab(ttk.Frame):
             command=self.run_export_single,
         ).grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
 
-        # Folder frame: folder selection + tree
+        # Folder frame
         folder = ttk.LabelFrame(self, text="Folder processing (3 ACCA/DC cases)")
         folder.pack(side=tk.TOP, fill=tk.BOTH, expand=False, padx=10, pady=5)
 
@@ -89,17 +85,14 @@ class CaseProcessingTab(ttk.Frame):
             command=self.run_export_folder,
         ).grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
 
-        # Tree view for folder contents
+        # Tree view
         tree_frame = ttk.Frame(folder)
         tree_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
         folder.rowconfigure(3, weight=1)
         folder.columnconfigure(0, weight=1)
 
         self.case_tree = ttk.Treeview(
-            tree_frame,
-            columns=("file", "type"),
-            show="headings",
-            height=8,
+            tree_frame, columns=("file", "type"), show="headings", height=8
         )
         self.case_tree.heading("file", text="File name")
         self.case_tree.heading("type", text="Case type")
@@ -122,7 +115,25 @@ class CaseProcessingTab(ttk.Frame):
             filters,
             text="Deduplicate LimViolID (keep row(s) with max LimViolPct)",
             variable=self.max_filter_var,
-        ).pack(anchor="w", padx=5, pady=2)
+        ).grid(row=0, column=0, sticky="w", padx=5, pady=2)
+
+        ttk.Checkbutton(
+            filters,
+            text='Include "Branch MVA" rows',
+            variable=self.branch_mva_var,
+        ).grid(row=1, column=0, sticky="w", padx=5, pady=2)
+
+        ttk.Checkbutton(
+            filters,
+            text='Include "Bus Low Volts" rows',
+            variable=self.bus_lv_var,
+        ).grid(row=2, column=0, sticky="w", padx=5, pady=2)
+
+        ttk.Checkbutton(
+            filters,
+            text="Delete original (unfiltered) CSV after filtering",
+            variable=self.delete_original_var,
+        ).grid(row=3, column=0, sticky="w", padx=5, pady=(4, 2))
 
         # Local log box
         log_frame = ttk.LabelFrame(self, text="Case Processing Log")
@@ -136,6 +147,16 @@ class CaseProcessingTab(ttk.Frame):
         )
         self.local_log.configure(yscrollcommand=log_scroll.set)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # ───────────── Helpers ───────────── #
+
+    def _get_row_filter_categories(self):
+        cats = set()
+        if self.branch_mva_var.get():
+            cats.add("Branch MVA")
+        if self.bus_lv_var.get():
+            cats.add("Bus Low Volts")
+        return cats
 
     # ───────────── Single-case callbacks ───────────── #
 
@@ -156,10 +177,20 @@ class CaseProcessingTab(ttk.Frame):
             )
             return
 
+        cats = self._get_row_filter_categories()
         self.log("\n=== Processing single case ===")
+        if not cats:
+            self.log(
+                "WARNING: No LimViolCat categories selected. Row filter will be skipped."
+            )
+
         try:
             filtered_csv = process_case(
-                pwb, dedup_enabled=self.max_filter_var.get(), log_func=self.log
+                pwb,
+                dedup_enabled=self.max_filter_var.get(),
+                keep_categories=cats,
+                delete_original=self.delete_original_var.get(),
+                log_func=self.log,
             )
         except Exception as e:
             self.log(f"ERROR: {e}")
@@ -186,7 +217,6 @@ class CaseProcessingTab(ttk.Frame):
         self._scan_and_display_folder(folder)
 
     def _scan_and_display_folder(self, folder: str):
-        """Use core.case_finder to scan folder and update tree view."""
         self.case_tree.delete(*self.case_tree.get_children())
         self.target_cases = {}
 
@@ -217,7 +247,12 @@ class CaseProcessingTab(ttk.Frame):
             )
             return
 
+        cats = self._get_row_filter_categories()
         self.log("\n=== Batch processing ACCA/DC cases in folder ===")
+        if not cats:
+            self.log(
+                "WARNING: No LimViolCat categories selected. Row filter will be skipped."
+            )
 
         errors = []
         for label in TARGET_PATTERNS:
@@ -232,6 +267,8 @@ class CaseProcessingTab(ttk.Frame):
                 filtered_csv = process_case(
                     pwb_path,
                     dedup_enabled=self.max_filter_var.get(),
+                    keep_categories=cats,
+                    delete_original=self.delete_original_var.get(),
                     log_func=self.log,
                 )
                 if not filtered_csv:
