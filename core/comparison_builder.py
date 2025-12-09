@@ -31,46 +31,62 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
     if log_func:
         log_func(f"\nBuilding combined workbook:\n  {workbook_path}")
 
-    # Use Excel writer so we can create multiple sheets.
-    with pd.ExcelWriter(workbook_path, engine="xlsxwriter") as writer:
-        for folder_name, case_map in folder_to_case_csvs.items():
-            dfs = []
+    # Use ExcelWriter without forcing xlsxwriter.
+    # Pandas will pick a default engine (usually openpyxl).
+    try:
+        writer = pd.ExcelWriter(workbook_path)
+    except Exception as e:
+        if log_func:
+            log_func(f"ERROR: Could not create ExcelWriter: {e}")
+        return None
 
-            # Preserve fixed order of case types
-            for label in TARGET_PATTERNS:
-                csv_path = case_map.get(label)
-                if not csv_path:
+    try:
+        with writer as xls_writer:
+            for folder_name, case_map in folder_to_case_csvs.items():
+                dfs = []
+
+                # Preserve fixed order of case types
+                for label in TARGET_PATTERNS:
+                    csv_path = case_map.get(label)
+                    if not csv_path:
+                        if log_func:
+                            log_func(
+                                f"  [{folder_name}] Missing case type '{label}' "
+                                f"(no filtered CSV found)."
+                            )
+                        continue
+
+                    try:
+                        df = pd.read_csv(csv_path)
+                        # Tag which case each row came from
+                        df.insert(0, "CaseType", label)
+                        dfs.append(df)
+                    except Exception as e:
+                        if log_func:
+                            log_func(
+                                f"  [{folder_name}] WARNING: Failed to read {csv_path}: {e}"
+                            )
+
+                if not dfs:
                     if log_func:
                         log_func(
-                            f"  [{folder_name}] Missing case type '{label}' "
-                            f"(no filtered CSV found)."
+                            f"  [{folder_name}] No CSVs to combine; skipping sheet."
                         )
                     continue
 
-                try:
-                    df = pd.read_csv(csv_path)
-                    # Optional: tag which case each row came from
-                    df.insert(0, "CaseType", label)
-                    dfs.append(df)
-                except Exception as e:
-                    if log_func:
-                        log_func(
-                            f"  [{folder_name}] WARNING: Failed to read {csv_path}: {e}"
-                        )
+                combined = pd.concat(dfs, ignore_index=True)
 
-            if not dfs:
-                if log_func:
-                    log_func(f"  [{folder_name}] No CSVs to combine; skipping sheet.")
-                continue
+                # Excel sheet names must be <= 31 chars and non-empty
+                sheet_name = (folder_name or "Sheet").strip()[:31]
+                if not sheet_name:
+                    sheet_name = "Sheet"
 
-            combined = pd.concat(dfs, ignore_index=True)
+                combined.to_excel(xls_writer, sheet_name=sheet_name, index=False)
 
-            # Excel sheet names must be <= 31 chars and non-empty
-            sheet_name = (folder_name or "Sheet").strip()[:31]
-            if not sheet_name:
-                sheet_name = "Sheet"
-
-            combined.to_excel(writer, sheet_name=sheet_name, index=False)
+    except Exception as e:
+        if log_func:
+            log_func(f"ERROR while building workbook: {e}")
+        return None
 
     if log_func:
         log_func("Combined workbook build complete.")
