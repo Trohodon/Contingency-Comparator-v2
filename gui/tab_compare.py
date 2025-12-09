@@ -2,6 +2,8 @@
 
 import os
 import math
+from typing import Optional
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -39,7 +41,7 @@ class CompareTab(ttk.Frame):
         self.local_log = None
         self.external_log_func = None
 
-        # We will store one Treeview per tab keyed by canonical case type
+        # One Treeview per tab keyed by canonical case type
         self._trees: dict[str, ttk.Treeview] = {}
 
         self._build_gui()
@@ -226,7 +228,7 @@ class CompareTab(ttk.Frame):
         try:
             n_raw = self.num_comp_var.get().strip()
             if n_raw == "" or n_raw == "0":
-                max_rows = None
+                max_rows: Optional[int] = None
             else:
                 max_rows = int(n_raw)
                 if max_rows <= 0:
@@ -269,7 +271,7 @@ class CompareTab(ttk.Frame):
         right_sheet: str,
         case_type_canonical: str,
         display_label: str,
-        max_rows: int | None,
+        max_rows: Optional[int],
     ):
         """
         Build comparison DF for one case type and push it into that tab's Treeview.
