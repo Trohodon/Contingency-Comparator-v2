@@ -6,13 +6,15 @@ from tkinter import ttk, filedialog, messagebox
 
 from core.case_finder import scan_folder, TARGET_PATTERNS
 from core.case_processor import process_case
+from core.comparison_builder import build_workbook
 
 
 class CaseProcessingTab(ttk.Frame):
     """
     GUI tab for:
       - Single case processing
-      - Folder scan + processing of the 3 ACCA/DC cases
+      - Folder scan + processing of ACCA/DC cases
+      - (NEW) Multi-folder mode: each subfolder is a scenario to compare
     """
 
     def __init__(self, master):
@@ -24,13 +26,14 @@ class CaseProcessingTab(ttk.Frame):
         self.pwb_path = tk.StringVar(value="No .pwb file selected")
         self.folder_path = tk.StringVar(value="No folder selected")
 
+        # For single-folder mode: label -> full path
         self.target_cases = {}
 
         # Filter options
-        self.max_filter_var = tk.BooleanVar(value=True)      # existing
-        self.branch_mva_var = tk.BooleanVar(value=True)      # NEW – default ON
-        self.bus_lv_var = tk.BooleanVar(value=False)         # NEW – default OFF
-        self.delete_original_var = tk.BooleanVar(value=False)  # NEW – default OFF
+        self.max_filter_var = tk.BooleanVar(value=True)       # dedup
+        self.branch_mva_var = tk.BooleanVar(value=True)       # include Branch MVA
+        self.bus_lv_var = tk.BooleanVar(value=False)          # include Bus Low Volts
+        self.delete_original_var = tk.BooleanVar(value=False) # delete unfiltered CSV
 
         self._build_gui()
 
@@ -66,8 +69,8 @@ class CaseProcessingTab(ttk.Frame):
             command=self.run_export_single,
         ).grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
 
-        # Folder frame
-        folder = ttk.LabelFrame(self, text="Folder processing (3 ACCA/DC cases)")
+        # Folder frame: folder selection + tree
+        folder = ttk.LabelFrame(self, text="Folder processing (ACCA/DC cases)")
         folder.pack(side=tk.TOP, fill=tk.BOTH, expand=False, padx=10, pady=5)
 
         ttk.Label(folder, text="Selected folder:").grid(row=0, column=0, sticky="w")
@@ -81,18 +84,21 @@ class CaseProcessingTab(ttk.Frame):
 
         ttk.Button(
             folder,
-            text="Process 3 ACCA/DC cases in folder",
+            text="Process ACCA/DC cases in folder / subfolders",
             command=self.run_export_folder,
         ).grid(row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
 
-        # Tree view
+        # Tree view (for immediate folder preview; subfolder mode will mostly log)
         tree_frame = ttk.Frame(folder)
         tree_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
         folder.rowconfigure(3, weight=1)
         folder.columnconfigure(0, weight=1)
 
         self.case_tree = ttk.Treeview(
-            tree_frame, columns=("file", "type"), show="headings", height=8
+            tree_frame,
+            columns=("file", "type"),
+            show="headings",
+            height=8,
         )
         self.case_tree.heading("file", text="File name")
         self.case_tree.heading("type", text="Case type")
@@ -214,9 +220,11 @@ class CaseProcessingTab(ttk.Frame):
             return
 
         self.folder_path.set(folder)
+        # For immediate feedback, just scan this folder's own .pwb files.
         self._scan_and_display_folder(folder)
 
     def _scan_and_display_folder(self, folder: str):
+        """Preview .pwb files directly in this folder (subfolders handled at run time)."""
         self.case_tree.delete(*self.case_tree.get_children())
         self.target_cases = {}
 
@@ -233,13 +241,36 @@ class CaseProcessingTab(ttk.Frame):
             )
 
     def run_export_folder(self):
-        folder = self.folder_path.get()
-        if not os.path.isdir(folder):
+        root = self.folder_path.get()
+        if not os.path.isdir(root):
             messagebox.showwarning(
                 "No folder selected", "Please select a valid folder."
             )
             return
 
+        cats = self._get_row_filter_categories()
+        if not cats:
+            self.log(
+                "WARNING: No LimViolCat categories selected. Row filter will be skipped."
+            )
+
+        # Look for subfolders inside the root folder.
+        subdirs = sorted(
+            d
+            for d in os.listdir(root)
+            if os.path.isdir(os.path.join(root, d))
+        )
+
+        if subdirs:
+            # NEW: multi-folder mode
+            self._run_export_multi_folder(root, subdirs, cats)
+        else:
+            # Old behaviour: just this one folder with 3 cases
+            self._run_export_single_folder(root, cats)
+
+    # ---------- Single-folder (old behaviour) ---------- #
+
+    def _run_export_single_folder(self, folder: str, cats):
         if not self.target_cases:
             messagebox.showwarning(
                 "No target cases found",
@@ -247,12 +278,7 @@ class CaseProcessingTab(ttk.Frame):
             )
             return
 
-        cats = self._get_row_filter_categories()
         self.log("\n=== Batch processing ACCA/DC cases in folder ===")
-        if not cats:
-            self.log(
-                "WARNING: No LimViolCat categories selected. Row filter will be skipped."
-            )
 
         errors = []
         for label in TARGET_PATTERNS:
@@ -288,3 +314,83 @@ class CaseProcessingTab(ttk.Frame):
                 "Batch processing complete",
                 "All detected ACCA/DC cases in the folder have been processed.",
             )
+
+    # ---------- Multi-folder mode (NEW) ---------- #
+
+    def _run_export_multi_folder(self, root: str, subdirs, cats):
+        self.log(
+            "\n=== Multi-folder mode: each subfolder is a case set to compare ==="
+        )
+        self.log(f"Root folder: {root}")
+        self.log(f"Subfolders found: {', '.join(subdirs)}")
+
+        folder_to_case_csvs = {}
+        errors = []
+
+        for sub in subdirs:
+            scenario_folder = os.path.join(root, sub)
+            self.log(f"\n=== Processing scenario folder: {sub} ===")
+
+            cases, target_cases = scan_folder(scenario_folder, self.log)
+            if not target_cases:
+                self.log(f"  [{sub}] No ACCA/DC cases found; skipping.")
+                continue
+
+            case_csvs = {}
+
+            for label in TARGET_PATTERNS:
+                pwb_path = target_cases.get(label)
+                if not pwb_path:
+                    self.log(f"  [{sub}] Skipping type [{label}] (not found).")
+                    continue
+
+                self.log(f"\n  [{sub}] --- Processing [{label}] case ---")
+                self.log(f"  Case path: {pwb_path}")
+                try:
+                    filtered_csv = process_case(
+                        pwb_path,
+                        dedup_enabled=self.max_filter_var.get(),
+                        keep_categories=cats,
+                        delete_original=self.delete_original_var.get(),
+                        log_func=self.log,
+                    )
+                    if not filtered_csv:
+                        raise RuntimeError("No filtered CSV was created.")
+                    case_csvs[label] = filtered_csv
+                except Exception as e:
+                    msg = f"  [{sub}] ERROR processing [{label}] case: {e}"
+                    self.log(msg)
+                    errors.append(msg)
+
+            if case_csvs:
+                folder_to_case_csvs[sub] = case_csvs
+            else:
+                self.log(f"  [{sub}] No filtered CSVs produced; no sheet will be made.")
+
+        # Build the combined workbook in the root folder
+        workbook_path = build_workbook(root, folder_to_case_csvs, self.log)
+
+        if workbook_path:
+            self.log(f"\nCombined workbook created at:\n  {workbook_path}")
+            if errors:
+                messagebox.showerror(
+                    "Multi-folder processing completed with errors",
+                    f"Workbook created:\n{workbook_path}\n\n"
+                    "Some cases failed; see log for details.",
+                )
+            else:
+                messagebox.showinfo(
+                    "Multi-folder processing complete",
+                    f"Workbook created:\n{workbook_path}",
+                )
+        else:
+            if errors:
+                messagebox.showerror(
+                    "Processing completed with errors",
+                    "No combined workbook created. See log for details.",
+                )
+            else:
+                messagebox.showwarning(
+                    "Nothing processed",
+                    "No valid subfolders / cases found to build a workbook.",
+                )
