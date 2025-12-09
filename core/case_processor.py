@@ -18,10 +18,10 @@ def _make_filtered_path(original_csv: str) -> str:
     return f"{base}_Filtered{ext}"
 
 
-def post_process_csv(csv_path: str, dedup_enabled: bool, log_func=None) -> str:
+def post_process_csv(csv_path: str, dedup_enabled: bool, keep_categories, log_func=None) -> str:
     """
     Apply:
-      1) Row filter (LimViolCat)
+      1) Row filter (LimViolCat) using keep_categories
       2) Optional LimViolID max filter
       3) Column blacklist
     Returns:
@@ -52,10 +52,13 @@ def post_process_csv(csv_path: str, dedup_enabled: bool, log_func=None) -> str:
         data = raw.iloc[1:].copy()
         data.columns = header_row
 
-        # 1) Row filter
+        # 1) Row filter with chosen categories
         if log_func:
-            log_func("\nApplying row filter (only keep LimViolCat == 'Branch MVA')...")
-        filtered_data, removed_rows = apply_row_filter(data, log_func)
+            cats_txt = ", ".join(sorted(keep_categories)) if keep_categories else "NONE"
+            log_func(f"\nApplying row filter for LimViolCat categories: {cats_txt}")
+        filtered_data, removed_rows = apply_row_filter(
+            data, keep_values=keep_categories, log_func=log_func
+        )
         if log_func:
             log_func(f"Rows removed by row filter: {removed_rows}")
 
@@ -106,11 +109,18 @@ def post_process_csv(csv_path: str, dedup_enabled: bool, log_func=None) -> str:
         return None
 
 
-def process_case(pwb_path: str, dedup_enabled: bool, log_func=None) -> str:
+def process_case(
+    pwb_path: str,
+    dedup_enabled: bool,
+    keep_categories,
+    delete_original: bool,
+    log_func=None,
+) -> str:
     """
     Full pipeline for a single .pwb:
       - Export ViolationCTG to CSV via SimAuto
       - Run post_process_csv on it
+      - Optionally delete the original (unfiltered) CSV
     Returns:
       path to filtered CSV (or None on error)
     """
@@ -122,4 +132,15 @@ def process_case(pwb_path: str, dedup_enabled: bool, log_func=None) -> str:
     if log_func:
         log_func(f"Exported CSV path: {csv_out}")
 
-    return post_process_csv(csv_out, dedup_enabled, log_func)
+    filtered_csv = post_process_csv(csv_out, dedup_enabled, keep_categories, log_func)
+
+    if delete_original and filtered_csv and os.path.exists(csv_out):
+        try:
+            os.remove(csv_out)
+            if log_func:
+                log_func(f"Deleted original (unfiltered) CSV: {csv_out}")
+        except Exception as e:
+            if log_func:
+                log_func(f"WARNING: Failed to delete original CSV: {e}")
+
+    return filtered_csv
