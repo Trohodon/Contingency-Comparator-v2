@@ -1,189 +1,102 @@
 # gui/app.py
+from __future__ import annotations
+
 import tkinter as tk
 from tkinter import ttk
 
-# --- Update these imports to match your project files/classes ---
-# Example possibilities:
-# from gui.tab_case import CaseProcessingTab
-# from gui.tab_compare import CompareTab
-from gui.tab_case import CaseProcessingTab
-from gui.tab_compare import CompareTab
+# Your existing tabs (keep these filenames/imports matching your project)
+# If your modules/classes are named differently, adjust ONLY these imports.
+from gui.case_processing_view import CaseProcessingView
+from gui.compare_cases_view import CompareCasesView
+
+# New Trends tab
+from gui.trends_view import TrendsView
 
 
-APP_TITLE = "Contingency Comparison Tool"
-APP_SUBTITLE = "PowerWorld Results Export + Compare"
-APP_VERSION = "v1.0"
+class App(tk.Tk):
+    """
+    Main window for the Contingency Comparison Tool.
 
+    IMPORTANT:
+    - App is the Tk root (so you can do App().mainloop()).
+    - Each tab is a ttk.Frame subclass that receives (master=self.notebook).
+    """
 
-class App(ttk.Frame):
-    def __init__(self, master):
-        super().__init__(master)
-        self.master = master
+    def __init__(self):
+        super().__init__()
 
-        self._status_var = tk.StringVar(value="Ready")
+        # ---- Window ----
+        self.title("Contingency Comparison Tool")
+        self.geometry("1250x760")
+        self.minsize(1050, 650)
 
-        self._configure_window()
-        self._configure_style()
-
-        self._build_header()
-        self._build_body()
-        self._build_status_bar()
-
-    # ---------------- Window + Style ---------------- #
-
-    def _configure_window(self):
-        self.master.title(APP_TITLE)
-        self.master.minsize(1100, 700)
-
-        # If you want it to open centered-ish:
+        # Use a modern theme if available
+        style = ttk.Style(self)
         try:
-            w, h = 1200, 760
-            sx = (self.master.winfo_screenwidth() - w) // 2
-            sy = (self.master.winfo_screenheight() - h) // 3
-            self.master.geometry(f"{w}x{h}+{sx}+{sy}")
+            style.theme_use("clam")
         except Exception:
             pass
 
-    def _configure_style(self):
-        style = ttk.Style()
+        # ---- Header ----
+        header = ttk.Frame(self)
+        header.pack(side="top", fill="x")
 
-        # Use a native-ish theme when possible
-        # On Windows, "vista" or "clam" usually looks clean.
-        try:
-            style.theme_use("vista")
-        except Exception:
-            try:
-                style.theme_use("clam")
-            except Exception:
-                pass
+        title_row = ttk.Frame(header)
+        title_row.pack(side="top", fill="x", padx=12, pady=(10, 2))
 
-        # Global font + padding (ttk is limited, but this helps a ton)
-        base_font = ("Segoe UI", 10)
-
-        style.configure(".", font=base_font)
-        style.configure("TButton", padding=(10, 6))
-        style.configure("TLabel", padding=(0, 0))
-        style.configure("TEntry", padding=(6, 4))
-        style.configure("TCombobox", padding=(6, 4))
-        style.configure("TNotebook", padding=(0, 0))
-        style.configure("TNotebook.Tab", padding=(12, 8))
-
-        # “Card” style (LabelFrame) look
-        style.configure("Card.TLabelframe", padding=(10, 8))
-        style.configure("Card.TLabelframe.Label", font=("Segoe UI", 10, "bold"))
-
-        # Status bar label style
-        style.configure("Status.TLabel", font=("Segoe UI", 9))
-
-    # ---------------- Layout ---------------- #
-
-    def _build_header(self):
-        header = tk.Frame(self.master, bg="#0B2F5B")  # deep navy
-        header.pack(side=tk.TOP, fill=tk.X)
-
-        title = tk.Label(
-            header,
-            text=APP_TITLE,
-            bg="#0B2F5B",
-            fg="white",
+        self._title_label = ttk.Label(
+            title_row,
+            text="Contingency Comparison Tool",
             font=("Segoe UI", 16, "bold"),
-            padx=14,
-            pady=10,
         )
-        title.pack(side=tk.LEFT)
+        self._title_label.pack(side="left")
 
-        subtitle = tk.Label(
-            header,
-            text=APP_SUBTITLE,
-            bg="#0B2F5B",
-            fg="#DCE7F5",
+        self._subtitle_label = ttk.Label(
+            title_row,
+            text="PowerWorld Results Export + Compare",
             font=("Segoe UI", 10),
-            padx=10,
         )
-        subtitle.pack(side=tk.LEFT)
+        self._subtitle_label.pack(side="left", padx=(12, 0))
 
-        version = tk.Label(
-            header,
-            text=APP_VERSION,
-            bg="#0B2F5B",
-            fg="#DCE7F5",
-            font=("Segoe UI", 10, "bold"),
-            padx=14,
-        )
-        version.pack(side=tk.RIGHT)
+        # ---- Notebook ----
+        body = ttk.Frame(self)
+        body.pack(side="top", fill="both", expand=True)
 
-    def _build_body(self):
-        # Outer body frame with consistent margins
-        body = ttk.Frame(self.master, padding=(12, 12))
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        # Notebook with two tabs
         self.notebook = ttk.Notebook(body)
-        self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # --- Tab 1: Case Processing ---
-        self.tab_case = ttk.Frame(self.notebook, padding=(8, 8))
-        self.notebook.add(self.tab_case, text="Case Processing")
+        # ---- Tabs ----
+        # Each tab is responsible for its own UI and logic
+        self.case_processing_tab = CaseProcessingView(self.notebook)
+        self.compare_cases_tab = CompareCasesView(self.notebook)
+        self.trends_tab = TrendsView(self.notebook)
 
-        # --- Tab 2: Compare Cases ---
-        self.tab_compare = ttk.Frame(self.notebook, padding=(8, 8))
-        self.notebook.add(self.tab_compare, text="Compare Cases")
+        self.notebook.add(self.case_processing_tab, text="Case Processing")
+        self.notebook.add(self.compare_cases_tab, text="Compare Cases")
+        self.notebook.add(self.trends_tab, text="Trends")
 
-        # Mount your existing tab classes inside these frames
-        self.case_processing_view = CaseProcessingTab(self.tab_case)
-        self.case_processing_view.pack(fill=tk.BOTH, expand=True)
+        # Optional: default to Compare Cases tab
+        # self.notebook.select(self.compare_cases_tab)
 
-        self.compare_view = CompareTab(self.tab_compare)
-        self.compare_view.pack(fill=tk.BOTH, expand=True)
+        # ---- Footer (optional) ----
+        footer = ttk.Frame(self)
+        footer.pack(side="bottom", fill="x")
 
-        # Optional: If your tab classes support external logging / status hooks
-        # you can wire them up here without breaking anything.
-        self._try_wire_hooks()
-
-    def _build_status_bar(self):
-        bar = ttk.Frame(self.master, padding=(10, 6))
-        bar.pack(side=tk.BOTTOM, fill=tk.X)
-
-        ttk.Separator(self.master, orient="horizontal").pack(side=tk.BOTTOM, fill=tk.X)
-
-        status_label = ttk.Label(bar, textvariable=self._status_var, style="Status.TLabel")
-        status_label.pack(side=tk.LEFT)
-
-        # Right side “hint”
-        hint = ttk.Label(
-            bar,
-            text="Tip: Add comparisons to the queue → Build queued workbook",
-            style="Status.TLabel",
+        self._status_var = tk.StringVar(value="Ready")
+        self._status_label = ttk.Label(
+            footer,
+            textvariable=self._status_var,
+            anchor="w",
         )
-        hint.pack(side=tk.RIGHT)
+        self._status_label.pack(side="left", fill="x", expand=True, padx=10, pady=6)
 
-    # ---------------- Hooks ---------------- #
+        # Quit shortcut
+        self.bind("<Escape>", lambda _e: self.destroy())
 
     def set_status(self, text: str):
-        """Tabs can call this to update the status bar."""
+        """Tabs can call this if you wire it in later."""
         self._status_var.set(text)
-        self.master.update_idletasks()
-
-    def _try_wire_hooks(self):
-        """
-        Non-breaking optional wiring:
-        - If CompareTab has `external_log_func`, we could set it.
-        - If tabs want status updates, they can call self.master_app.set_status(...)
-        """
-        # Give tabs a reference to the app if they want to call set_status()
-        for view in (self.case_processing_view, self.compare_view):
-            try:
-                view.master_app = self
-            except Exception:
-                pass
-
-
-def run():
-    root = tk.Tk()
-    app = App(root)
-    # app is a ttk.Frame mounted by itself, but we already packed everything via root frames
-    root.mainloop()
 
 
 if __name__ == "__main__":
-    run()
+    App().mainloop()
