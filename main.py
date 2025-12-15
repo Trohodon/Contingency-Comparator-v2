@@ -1,5 +1,8 @@
 # main.py
-from gui.app import PwbExportApp
+import tkinter as tk
+from gui.app import App
 
 if __name__ == "__main__":
-    PwbExportApp().mainloop()
+    root = tk.Tk()
+    app = App(root)
+    root.mainloop()
