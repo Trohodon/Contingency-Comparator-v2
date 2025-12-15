@@ -2,9 +2,12 @@
 import tkinter as tk
 from tkinter import ttk
 
+# --- Update these imports to match your project files/classes ---
+# Example possibilities:
+# from gui.tab_case import CaseProcessingTab
+# from gui.tab_compare import CompareTab
 from gui.tab_case import CaseProcessingTab
 from gui.tab_compare import CompareTab
-from gui.trends_view import TrendsView  # NEW
 
 
 APP_TITLE = "Contingency Comparison Tool"
@@ -45,6 +48,7 @@ class App(ttk.Frame):
         style = ttk.Style()
 
         # Use a native-ish theme when possible
+        # On Windows, "vista" or "clam" usually looks clean.
         try:
             style.theme_use("vista")
         except Exception:
@@ -53,6 +57,7 @@ class App(ttk.Frame):
             except Exception:
                 pass
 
+        # Global font + padding (ttk is limited, but this helps a ton)
         base_font = ("Segoe UI", 10)
 
         style.configure(".", font=base_font)
@@ -63,9 +68,11 @@ class App(ttk.Frame):
         style.configure("TNotebook", padding=(0, 0))
         style.configure("TNotebook.Tab", padding=(12, 8))
 
+        # “Card” style (LabelFrame) look
         style.configure("Card.TLabelframe", padding=(10, 8))
         style.configure("Card.TLabelframe.Label", font=("Segoe UI", 10, "bold"))
 
+        # Status bar label style
         style.configure("Status.TLabel", font=("Segoe UI", 9))
 
     # ---------------- Layout ---------------- #
@@ -106,9 +113,11 @@ class App(ttk.Frame):
         version.pack(side=tk.RIGHT)
 
     def _build_body(self):
+        # Outer body frame with consistent margins
         body = ttk.Frame(self.master, padding=(12, 12))
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
+        # Notebook with two tabs
         self.notebook = ttk.Notebook(body)
         self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -120,10 +129,6 @@ class App(ttk.Frame):
         self.tab_compare = ttk.Frame(self.notebook, padding=(8, 8))
         self.notebook.add(self.tab_compare, text="Compare Cases")
 
-        # --- Tab 3: Trends (NEW) ---
-        self.tab_trends = ttk.Frame(self.notebook, padding=(8, 8))
-        self.notebook.add(self.tab_trends, text="Trends")
-
         # Mount your existing tab classes inside these frames
         self.case_processing_view = CaseProcessingTab(self.tab_case)
         self.case_processing_view.pack(fill=tk.BOTH, expand=True)
@@ -131,9 +136,8 @@ class App(ttk.Frame):
         self.compare_view = CompareTab(self.tab_compare)
         self.compare_view.pack(fill=tk.BOTH, expand=True)
 
-        self.trends_view = TrendsView(self.tab_trends)
-        self.trends_view.pack(fill=tk.BOTH, expand=True)
-
+        # Optional: If your tab classes support external logging / status hooks
+        # you can wire them up here without breaking anything.
         self._try_wire_hooks()
 
     def _build_status_bar(self):
@@ -145,6 +149,7 @@ class App(ttk.Frame):
         status_label = ttk.Label(bar, textvariable=self._status_var, style="Status.TLabel")
         status_label.pack(side=tk.LEFT)
 
+        # Right side “hint”
         hint = ttk.Label(
             bar,
             text="Tip: Add comparisons to the queue → Build queued workbook",
@@ -162,27 +167,21 @@ class App(ttk.Frame):
     def _try_wire_hooks(self):
         """
         Non-breaking optional wiring:
-        - Give tabs a reference to the app if they want to call set_status()
+        - If CompareTab has `external_log_func`, we could set it.
+        - If tabs want status updates, they can call self.master_app.set_status(...)
         """
-        for view in (self.case_processing_view, self.compare_view, self.trends_view):
+        # Give tabs a reference to the app if they want to call set_status()
+        for view in (self.case_processing_view, self.compare_view):
             try:
                 view.master_app = self
             except Exception:
                 pass
 
-        # Optional: wire TrendsView log into status bar if you want
-        # (won't break if TrendsView doesn't use it)
-        try:
-            # If TrendsView supports a log callback, you can rebuild it as:
-            # self.trends_view._log_callback = self.set_status
-            pass
-        except Exception:
-            pass
-
 
 def run():
     root = tk.Tk()
-    App(root)
+    app = App(root)
+    # app is a ttk.Frame mounted by itself, but we already packed everything via root frames
     root.mainloop()
 
 
