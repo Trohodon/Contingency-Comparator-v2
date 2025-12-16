@@ -8,6 +8,7 @@ from .column_blacklist import (
     apply_blacklist,
     apply_row_filter,
     apply_limviolid_max_filter,
+    apply_ctglabel_max_filter,
 )
 
 
@@ -22,7 +23,9 @@ def post_process_csv(csv_path: str, dedup_enabled: bool, keep_categories, log_fu
     """
     Apply:
       1) Row filter (LimViolCat) using keep_categories
-      2) Optional LimViolID max filter
+      2) Optional dedup:
+           - LimViolID max filter (original)
+           - CTGLabel max filter (fix for repeated contingency rows)
       3) Column blacklist
     Returns:
         path to filtered CSV (or None on failure)
@@ -56,31 +59,43 @@ def post_process_csv(csv_path: str, dedup_enabled: bool, keep_categories, log_fu
         if log_func:
             cats_txt = ", ".join(sorted(keep_categories)) if keep_categories else "NONE"
             log_func(f"\nApplying row filter for LimViolCat categories: {cats_txt}")
+
         filtered_data, removed_rows = apply_row_filter(
             data, keep_values=keep_categories, log_func=log_func
         )
+
         if log_func:
             log_func(f"Rows removed by row filter: {removed_rows}")
 
-        # 2) Optional dedup by LimViolID
+        # 2) Optional dedup
         if dedup_enabled:
             if log_func:
                 log_func(
                     "\nApplying LimViolID max filter "
                     "(keep row(s) with highest LimViolPct per LimViolID)..."
                 )
-            filtered_data, removed_max = apply_limviolid_max_filter(
-                filtered_data, log_func
-            )
+            filtered_data, removed_max = apply_limviolid_max_filter(filtered_data, log_func)
             if log_func:
                 log_func(f"Rows removed by LimViolID max filter: {removed_max}")
+
+            # NEW: dedup by CTGLabel too (fix for DCwAC repeats)
+            if log_func:
+                log_func(
+                    "\nApplying CTGLabel max filter "
+                    "(keep row with highest LimViolPct per CTGLabel)..."
+                )
+            filtered_data, removed_ctg = apply_ctglabel_max_filter(filtered_data, log_func)
+            if log_func:
+                log_func(f"Rows removed by CTGLabel max filter: {removed_ctg}")
+
         else:
             if log_func:
-                log_func("\nLimViolID max filter is disabled; skipping.")
+                log_func("\nDedup is disabled; skipping LimViolID/CTGLabel max filters.")
 
         # 3) Column blacklist
         if log_func:
             log_func("\nApplying column blacklist...")
+
         filtered_data, removed_cols = apply_blacklist(filtered_data)
 
         if log_func:
