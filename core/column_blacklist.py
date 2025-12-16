@@ -4,8 +4,12 @@
 Central place for:
 - Removing unwanted columns (column blacklist)
 - Filtering unwanted ROWS (row filter)
-- Optional dedup filter on LimViolID (keep highest LimViolPct)
+- Optional dedup filter (keep highest LimViolPct)
+  - Primary: per LimViolID (original behavior)
+  - Extra: per CTGLabel (fix for repeated contingencies in DCwAC)
 """
+
+import pandas as pd
 
 # ───────────────────────────────────────
 # COLUMN BLACKLIST
@@ -95,15 +99,30 @@ def apply_row_filter(df, keep_values=None, log_func=None):
 
 
 # ───────────────────────────────────────
-# DEDUP FILTER LOGIC (LimViolID / LimViolPct)
+# DEDUP FILTER LOGIC
 # ───────────────────────────────────────
 
 DEDUP_ID_COLUMN = "LimViolID"
 DEDUP_VALUE_COLUMN = "LimViolPct"
+DEDUP_CTG_COLUMN = "CTGLabel"
+
+
+def _to_numeric_pct(series, log_func=None):
+    """
+    Convert LimViolPct-like values to numeric safely.
+    Handles strings, blanks, and weird values.
+    """
+    try:
+        return pd.to_numeric(series, errors="coerce")
+    except Exception as e:
+        if log_func:
+            log_func(f"WARNING: Failed numeric conversion for {series.name}: {e}")
+        return series
 
 
 def apply_limviolid_max_filter(df, log_func=None):
     """
+    Original behavior:
     For each LimViolID, keep only the row(s) with the highest LimViolPct.
     Return (filtered_df, removed_count).
     """
@@ -117,15 +136,56 @@ def apply_limviolid_max_filter(df, log_func=None):
 
     before = len(df)
 
+    work = df.copy()
+    work[DEDUP_VALUE_COLUMN] = _to_numeric_pct(work[DEDUP_VALUE_COLUMN], log_func=log_func)
+
     try:
-        max_per_id = df.groupby(DEDUP_ID_COLUMN)[DEDUP_VALUE_COLUMN].transform("max")
+        max_per_id = work.groupby(DEDUP_ID_COLUMN)[DEDUP_VALUE_COLUMN].transform("max")
     except Exception as e:
         if log_func:
             log_func(f"WARNING: Failed to compute max per LimViolID: {e}")
         return df, 0
 
-    filtered_df = df[df[DEDUP_VALUE_COLUMN] == max_per_id].copy()
+    filtered_df = work[work[DEDUP_VALUE_COLUMN] == max_per_id].copy()
     after = len(filtered_df)
     removed = before - after
 
+    return filtered_df, removed
+
+
+def apply_ctglabel_max_filter(df, log_func=None):
+    """
+    NEW:
+    For each CTGLabel (contingency line), keep only the row with the highest LimViolPct.
+    This fixes cases where the same CTGLabel appears multiple times due to different LimViolIDs.
+    Return (filtered_df, removed_count).
+    """
+    if DEDUP_CTG_COLUMN not in df.columns or DEDUP_VALUE_COLUMN not in df.columns:
+        if log_func:
+            log_func(
+                "WARNING: Cannot apply CTGLabel max filter because "
+                f"'{DEDUP_CTG_COLUMN}' or '{DEDUP_VALUE_COLUMN}' is missing."
+            )
+        return df, 0
+
+    before = len(df)
+
+    work = df.copy()
+    work[DEDUP_VALUE_COLUMN] = _to_numeric_pct(work[DEDUP_VALUE_COLUMN], log_func=log_func)
+
+    # Pick the index of the max % row within each CTGLabel group
+    try:
+        idx = work.groupby(DEDUP_CTG_COLUMN)[DEDUP_VALUE_COLUMN].idxmax()
+    except Exception as e:
+        if log_func:
+            log_func(f"WARNING: Failed to compute idxmax per CTGLabel: {e}")
+        return df, 0
+
+    filtered_df = work.loc[idx].copy()
+
+    # Keep stable ordering (highest % first is usually helpful)
+    filtered_df.sort_values(by=DEDUP_VALUE_COLUMN, ascending=False, inplace=True)
+
+    after = len(filtered_df)
+    removed = before - after
     return filtered_df, removed
