@@ -20,6 +20,57 @@ PRETTY_CASE_NAMES = {
 }
 
 
+def _to_numeric_series(s):
+    """Safe numeric conversion (keeps NaN if weird strings)."""
+    return pd.to_numeric(s, errors="coerce")
+
+
+def _dedupe_keep_highest_pct(df: pd.DataFrame, log_func=None, context=""):
+    """
+    Keep only the highest LimViolPct row for each unique contingency+violation pair
+    (per CaseType).
+
+    Primary key: CaseType + CTGLabel + LimViolID
+    Fallback key if LimViolID missing: CaseType + CTGLabel
+    """
+    if df is None or df.empty:
+        return df
+
+    required = {"CaseType", "CTGLabel", "LimViolPct"}
+    if not required.issubset(set(df.columns)):
+        # Not enough info to dedupe reliably
+        return df
+
+    out = df.copy()
+
+    # Make LimViolPct numeric so sorting works correctly
+    out["LimViolPct"] = _to_numeric_series(out["LimViolPct"])
+
+    has_limviolid = "LimViolID" in out.columns
+
+    if has_limviolid:
+        subset = ["CaseType", "CTGLabel", "LimViolID"]
+    else:
+        subset = ["CaseType", "CTGLabel"]
+
+    before = len(out)
+
+    # Sort so the highest % comes first within each group
+    out = out.sort_values(by=["CaseType", "LimViolPct"], ascending=[True, False])
+
+    # Drop duplicates keeping first (highest %)
+    out = out.drop_duplicates(subset=subset, keep="first")
+
+    after = len(out)
+
+    if log_func and before != after:
+        log_func(
+            f"{context}Dedupe applied ({', '.join(subset)}): {before} -> {after}"
+        )
+
+    return out
+
+
 def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
     """
     Fallback: simple one-sheet-per-scenario workbook, no fancy formatting.
@@ -29,9 +80,7 @@ def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
             log_func("No data to build combined workbook.")
         return None
 
-    workbook_path = os.path.join(
-        root_folder, "Combined_ViolationCTG_Comparison.xlsx"
-    )
+    workbook_path = os.path.join(root_folder, "Combined_ViolationCTG_Comparison.xlsx")
 
     if log_func:
         log_func(f"\nBuilding SIMPLE combined workbook:\n  {workbook_path}")
@@ -57,14 +106,17 @@ def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
                         dfs.append(df)
                     except Exception as e:
                         if log_func:
-                            log_func(
-                                f"  [{folder_name}] WARNING: Failed to read {csv_path}: {e}"
-                            )
+                            log_func(f"  [{folder_name}] WARNING: Failed to read {csv_path}: {e}")
 
                 if not dfs:
                     continue
 
                 combined = pd.concat(dfs, ignore_index=True)
+
+                # SAFETY NET: dedupe here as well
+                combined = _dedupe_keep_highest_pct(
+                    combined, log_func=log_func, context=f"[{folder_name}] "
+                )
 
                 sheet_name = (folder_name or "Sheet").strip()[:31]
                 if not sheet_name:
@@ -96,10 +148,7 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
 
     if not OPENPYXL_AVAILABLE:
         if log_func:
-            log_func(
-                "openpyxl not available; building simple combined workbook "
-                "without special formatting."
-            )
+            log_func("openpyxl not available; building simple combined workbook without special formatting.")
         return _build_simple_workbook(root_folder, folder_to_case_csvs, log_func)
 
     # ---------------------------
@@ -119,12 +168,17 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
                 dfs.append(df)
             except Exception as e:
                 if log_func:
-                    log_func(
-                        f"  [{folder_name}] WARNING: Failed to read {csv_path}: {e}"
-                    )
+                    log_func(f"  [{folder_name}] WARNING: Failed to read {csv_path}: {e}")
 
         if dfs:
-            scenario_data[folder_name] = pd.concat(dfs, ignore_index=True)
+            combined = pd.concat(dfs, ignore_index=True)
+
+            # SAFETY NET: dedupe across the whole scenario
+            combined = _dedupe_keep_highest_pct(
+                combined, log_func=log_func, context=f"[{folder_name}] "
+            )
+
+            scenario_data[folder_name] = combined
 
     if not scenario_data:
         if log_func:
@@ -134,15 +188,12 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
     # ---------------------------
     # Create formatted workbook
     # ---------------------------
-    workbook_path = os.path.join(
-        root_folder, "Combined_ViolationCTG_Comparison.xlsx"
-    )
+    workbook_path = os.path.join(root_folder, "Combined_ViolationCTG_Comparison.xlsx")
 
     if log_func:
         log_func(f"\nBuilding FORMATTED combined workbook:\n  {workbook_path}")
 
     wb = Workbook()
-    # Remove the default sheet; we'll create our own
     default_sheet = wb.active
     wb.remove(default_sheet)
 
@@ -161,7 +212,6 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
         bottom=Side(style="thin"),
     )
 
-    # Build each scenario sheet
     for folder_name, df in scenario_data.items():
         # Sanity check columns
         required = ["CaseType", "CTGLabel", "LimViolValue", "LimViolPct"]
@@ -171,36 +221,38 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
 
         has_limviolid = "LimViolID" in df.columns
 
-        # Create sheet
         sheet_name = (folder_name or "Sheet").strip()[:31]
         if not sheet_name:
             sheet_name = "Sheet"
         ws = wb.create_sheet(title=sheet_name)
 
-        # Set column widths – contiguous columns B to E
-        ws.column_dimensions["B"].width = 55  # Contingency Events
-        ws.column_dimensions["C"].width = 55  # Resulting Issue
-        ws.column_dimensions["D"].width = 18  # Contingency Value (MVA)
-        ws.column_dimensions["E"].width = 18  # Percent Loading
+        # Column widths (B:E)
+        ws.column_dimensions["B"].width = 55
+        ws.column_dimensions["C"].width = 55
+        ws.column_dimensions["D"].width = 18
+        ws.column_dimensions["E"].width = 18
 
         current_row = 1
 
-        # Process blocks in fixed order: ACCA_LongTerm, ACCA_P1,2,4,7, DCwACver_P1-7
         for label in TARGET_PATTERNS:
-            block_df = df[df["CaseType"] == label]
+            block_df = df[df["CaseType"] == label].copy()
             if block_df.empty:
                 continue
+
+            # IMPORTANT: also dedupe per-block (in case only one block is bad)
+            block_df = _dedupe_keep_highest_pct(
+                block_df, log_func=log_func, context=f"[{folder_name}::{label}] "
+            )
+
+            # Sort final output highest-to-lowest for viewing
+            if "LimViolPct" in block_df.columns:
+                block_df["LimViolPct"] = _to_numeric_series(block_df["LimViolPct"])
+                block_df = block_df.sort_values("LimViolPct", ascending=False)
 
             pretty_name = PRETTY_CASE_NAMES.get(label, label)
 
             # ===== Title row =====
-            # Merge B:E for the title (no gaps between columns)
-            ws.merge_cells(
-                start_row=current_row,
-                start_column=2,  # B
-                end_row=current_row,
-                end_column=5,    # E
-            )
+            ws.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=5)
             c = ws.cell(row=current_row, column=2)
             c.value = pretty_name
             c.fill = title_fill
@@ -208,7 +260,6 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
             c.alignment = center
             for col in range(2, 6):
                 ws.cell(row=current_row, column=col).border = thin_border
-
             current_row += 1
 
             # ===== Header row =====
@@ -218,7 +269,6 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
                 ("D", "Contingency Value (MVA)"),
                 ("E", "Percent Loading"),
             ]
-
             for col_letter, text in headers:
                 col_idx = ord(col_letter) - ord("A") + 1
                 hc = ws.cell(row=current_row, column=col_idx)
@@ -227,45 +277,38 @@ def build_workbook(root_folder, folder_to_case_csvs, log_func=None):
                 hc.font = header_font
                 hc.alignment = center
                 hc.border = thin_border
-
             current_row += 1
 
             # ===== Data rows =====
-            for _, row in block_df.iterrows():
-                # Contingency Events (B)
+            for _, r in block_df.iterrows():
                 c = ws.cell(row=current_row, column=2)
-                c.value = row.get("CTGLabel", "")
+                c.value = r.get("CTGLabel", "")
                 c.font = data_font
                 c.alignment = left_align
                 c.border = thin_border
 
-                # Resulting Issue (C)
                 c = ws.cell(row=current_row, column=3)
-                c.value = row.get("LimViolID", "") if has_limviolid else ""
+                c.value = r.get("LimViolID", "") if has_limviolid else ""
                 c.font = data_font
                 c.alignment = left_align
                 c.border = thin_border
 
-                # Contingency Value (MVA) (D)
                 c = ws.cell(row=current_row, column=4)
-                c.value = row.get("LimViolValue", "")
+                c.value = r.get("LimViolValue", "")
                 c.font = data_font
                 c.alignment = center
                 c.border = thin_border
 
-                # Percent Loading (E)
                 c = ws.cell(row=current_row, column=5)
-                c.value = row.get("LimViolPct", "")
+                c.value = r.get("LimViolPct", "")
                 c.font = data_font
                 c.alignment = center
                 c.border = thin_border
 
                 current_row += 1
 
-            # One blank row between blocks
-            current_row += 1
+            current_row += 1  # blank row between blocks
 
-    # Save workbook
     try:
         wb.save(workbook_path)
     except Exception as e:
