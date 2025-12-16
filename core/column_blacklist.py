@@ -1,143 +1,170 @@
-# core/column_blacklist.py
+"""
+Central place for:
+- Removing unwanted columns (column blacklist)
+- Filtering unwanted ROWS (row filter)
+- Optional dedup filter on LimViolID (keep highest LimViolPct)
+"""
 
 import pandas as pd
 
+# ───────────────────────────────────────
+# COLUMN BLACKLIST
+# ───────────────────────────────────────
 
-# ------------------------------------------------------------
-# Column Blacklist
-# ------------------------------------------------------------
-# Edit this list as needed. Anything in here will be removed
-# AFTER filters run, right before saving the filtered CSV.
-BLACKLIST_COLUMNS = {
-    # Example columns you may want removed (add/remove freely):
-    "ViolationCTG",
-    "CaseName",
-    "CaseID",
-    "TimeStamp",
-    "Timestamp",
-    "DateTime",
-    "Memo",
-    "Notes",
-    "ContingencyID",
-    "MonitoredElementID",
-    "MonitoredElementType",
+BLACKLIST_BASE_NAMES = {
+    # Your base-name blacklist:
+    "BusNum",
+    "BusName",
+    "BusNomVolt",
+    "AreaNum",
+    "AreaName",
+    "ZoneNum",
+    # ...add the rest of your base names here...
+}
+
+BLACKLIST_EXACT_NAMES = {
+    # If you added any exact-name items, they go here
 }
 
 
-def apply_blacklist(df: pd.DataFrame):
-    """
-    Remove blacklisted columns. Returns (filtered_df, removed_cols_list).
-    """
-    if df is None or df.empty:
-        return df, []
+def is_blacklisted(col_name: str) -> bool:
+    name = str(col_name)
+    base = name.split(":", 1)[0]
 
-    removed = []
-    keep_cols = []
-    for c in df.columns:
-        if c in BLACKLIST_COLUMNS:
-            removed.append(c)
-        else:
-            keep_cols.append(c)
+    if base in BLACKLIST_BASE_NAMES:
+        return True
 
-    return df[keep_cols].copy(), removed
+    if name in BLACKLIST_EXACT_NAMES:
+        return True
+
+    return False
 
 
-# ------------------------------------------------------------
-# Row Filter (LimViolCat)
-# ------------------------------------------------------------
-def apply_row_filter(df: pd.DataFrame, keep_values, log_func=None):
+def apply_blacklist(df):
+    """Remove columns from the DataFrame."""
+    original_cols = list(df.columns)
+    keep_cols = [c for c in original_cols if not is_blacklisted(c)]
+    removed_cols = [c for c in original_cols if c not in keep_cols]
+
+    filtered_df = df[keep_cols].copy()
+    return filtered_df, removed_cols
+
+
+# ───────────────────────────────────────
+# ROW FILTER LOGIC (LimViolCat)
+# ───────────────────────────────────────
+
+ROW_FILTER_ENABLED = True
+ROW_FILTER_COLUMN = "LimViolCat"
+# Default if GUI doesn't specify anything:
+ROW_FILTER_KEEP_VALUES = {"Branch MVA"}
+
+
+def apply_row_filter(df, keep_values=None, log_func=None):
     """
-    Keep rows where LimViolCat is in keep_values.
-    If LimViolCat doesn't exist, do nothing.
-    Returns: (filtered_df, removed_count)
+    Filter out rows that don't match keep_values for LimViolCat.
+    keep_values: iterable of category strings (e.g. {"Branch MVA", "Bus Low Volts"})
+                 If None, falls back to ROW_FILTER_KEEP_VALUES.
+                 If empty set/list, row filter is skipped.
+    Return (filtered_df, removed_count).
     """
-    if df is None or df.empty:
+    if not ROW_FILTER_ENABLED:
         return df, 0
+
+    if ROW_FILTER_COLUMN not in df.columns:
+        if log_func:
+            log_func(f"WARNING: Row filter column '{ROW_FILTER_COLUMN}' not found.")
+        return df, 0
+
+    if keep_values is None:
+        keep_values = ROW_FILTER_KEEP_VALUES
+
+    keep_values = set(keep_values)
 
     if not keep_values:
-        # If user selects nothing, treat that as "keep everything"
         if log_func:
-            log_func("No categories selected; skipping LimViolCat row filter.")
-        return df, 0
-
-    if "LimViolCat" not in df.columns:
-        if log_func:
-            log_func("LimViolCat column not found; skipping category row filter.")
+            log_func("Row filter disabled: no LimViolCat categories selected.")
         return df, 0
 
     before = len(df)
-    mask = df["LimViolCat"].astype(str).isin(set(keep_values))
-    out = df.loc[mask].copy()
-    removed = before - len(out)
+    filtered_df = df[df[ROW_FILTER_COLUMN].isin(keep_values)].copy()
+    after = len(filtered_df)
+    removed = before - after
 
-    return out, removed
+    return filtered_df, removed
 
 
-# ------------------------------------------------------------
-# LimViolID max filter (FIXED)
-# ------------------------------------------------------------
-def _to_float_series(s: pd.Series) -> pd.Series:
+# ───────────────────────────────────────
+# DEDUP FILTER LOGIC (LimViolID / LimViolPct)
+# ───────────────────────────────────────
+
+DEDUP_ID_COLUMN = "LimViolID"
+DEDUP_VALUE_COLUMN = "LimViolPct"
+
+
+def _to_float_series(series: pd.Series) -> pd.Series:
     """
-    Convert LimViolPct column to float safely.
-    Handles numeric, strings, and strings with %.
-    Non-convertible -> NaN.
+    Convert LimViolPct values to float safely.
+    Supports:
+      - numeric types
+      - strings
+      - strings with '%' sign
+    Non-convertible values become NaN.
     """
-    if s is None:
+    if series is None:
         return pd.Series(dtype="float64")
 
-    if pd.api.types.is_numeric_dtype(s):
-        return s.astype(float)
+    if pd.api.types.is_numeric_dtype(series):
+        return series.astype(float)
 
     cleaned = (
-        s.astype(str)
+        series.astype(str)
         .str.replace("%", "", regex=False)
         .str.strip()
     )
     return pd.to_numeric(cleaned, errors="coerce")
 
 
-def apply_limviolid_max_filter(df: pd.DataFrame, log_func=None):
+def apply_limviolid_max_filter(df, log_func=None):
     """
     Dedup ONLY by LimViolID:
-      - If multiple rows share the same LimViolID, keep the single row
-        with the highest LimViolPct.
+      - If multiple rows share the same LimViolID, keep exactly ONE row:
+        the row with the highest LimViolPct.
       - Do NOT dedup by CTGLabel.
-      - If there are ties, keep the first after sorting (so only one row kept).
-    Returns: (filtered_df, removed_count)
+      - If LimViolPct is missing, keep first row per LimViolID.
+    Return (filtered_df, removed_count).
     """
     if df is None or df.empty:
         return df, 0
 
-    if "LimViolID" not in df.columns:
+    if DEDUP_ID_COLUMN not in df.columns:
         if log_func:
-            log_func("LimViolID not found; skipping LimViolID max filter.")
+            log_func(f"WARNING: '{DEDUP_ID_COLUMN}' not found; skipping LimViolID max filter.")
         return df, 0
 
-    if "LimViolPct" not in df.columns:
-        # No pct -> keep first row per LimViolID
-        before = len(df)
-        out = df.drop_duplicates(subset=["LimViolID"], keep="first")
+    before = len(df)
+
+    # If pct column missing, just drop duplicates by LimViolID (keep first)
+    if DEDUP_VALUE_COLUMN not in df.columns:
+        out = df.drop_duplicates(subset=[DEDUP_ID_COLUMN], keep="first").copy()
         removed = before - len(out)
         if log_func:
-            log_func("LimViolPct not found. Keeping first row per LimViolID.")
+            log_func(f"WARNING: '{DEDUP_VALUE_COLUMN}' not found; keeping first row per LimViolID.")
             log_func(f"Rows removed by LimViolID dedup: {removed}")
         return out, removed
 
     work = df.copy()
-    work["_LimViolPct_num"] = _to_float_series(work["LimViolPct"])
+    work["_LimViolPct_num"] = _to_float_series(work[DEDUP_VALUE_COLUMN])
 
-    before = len(work)
-
-    # Sort so the max pct appears first within each LimViolID
+    # Sort so the max pct appears first per LimViolID
     work = work.sort_values(
-        by=["LimViolID", "_LimViolPct_num"],
+        by=[DEDUP_ID_COLUMN, "_LimViolPct_num"],
         ascending=[True, False],
         na_position="last",
     )
 
-    # Keep exactly ONE row per LimViolID (the one with highest pct)
-    out = work.drop_duplicates(subset=["LimViolID"], keep="first").copy()
-
+    # Keep exactly one per LimViolID
+    out = work.drop_duplicates(subset=[DEDUP_ID_COLUMN], keep="first").copy()
     out = out.drop(columns=["_LimViolPct_num"], errors="ignore")
 
     removed = before - len(out)
