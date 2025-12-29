@@ -28,6 +28,7 @@ class CompareTab(ttk.Frame):
     - Build queue:
          * "Add to queue": add current Left vs Right pair
          * "Delete selected": remove pair from queue
+         * "Clear all": remove all queued pairs
          * "Build queued workbook": write a new .xlsx containing one sheet per pair
     """
 
@@ -79,6 +80,10 @@ class CompareTab(ttk.Frame):
         self.add_btn.configure(state=state)
         self.build_btn.configure(state=state)
         self.delete_btn.configure(state=state)
+
+        # NEW: clear-all button also follows running state
+        self.clear_all_btn.configure(state=state)
+
         self.update_idletasks()
         self.update()
 
@@ -160,17 +165,25 @@ class CompareTab(ttk.Frame):
         self._queue_listbox.configure(yscrollcommand=q_scroll.set)
         q_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # Buttons on the right of queue list
         self.delete_btn = ttk.Button(
             cmp_frame, text="Delete selected", command=self.delete_selected_queue_item
         )
         self.delete_btn.grid(row=1, column=4, sticky="nw", padx=(10, 5), pady=(4, 4))
 
+        # NEW: Clear all button (clears entire queue)
+        self.clear_all_btn = ttk.Button(
+            cmp_frame, text="Clear all", command=self.clear_all_queue
+        )
+        self.clear_all_btn.grid(row=1, column=5, sticky="nw", padx=(5, 5), pady=(4, 4))
+
+        # Build button moved to row 2 to make room
         self.build_btn = ttk.Button(
             cmp_frame,
             text="Build queued workbook",
             command=self.build_queued_workbook,
         )
-        self.build_btn.grid(row=1, column=5, sticky="nw", padx=(5, 5), pady=(4, 4))
+        self.build_btn.grid(row=2, column=5, sticky="nw", padx=(5, 5), pady=(4, 6))
 
         cmp_frame.rowconfigure(1, weight=1)
         cmp_frame.columnconfigure(1, weight=1)
@@ -260,6 +273,26 @@ class CompareTab(ttk.Frame):
             if 0 <= idx < len(self._queue):
                 removed = self._queue.pop(idx)
                 self.log(f"Removed from queue: {removed[0]} vs {removed[1]}")
+
+    def clear_all_queue(self):
+        """
+        Clear the entire comparison queue (and the listbox).
+        """
+        if not self._queue:
+            self.log("Queue is already empty.")
+            return
+
+        # Optional confirmation - remove these 3 lines if you don't want a popup.
+        if not messagebox.askyesno("Clear queue", "Clear ALL queued comparisons?"):
+            return
+
+        count = len(self._queue)
+        self._queue.clear()
+
+        if self._queue_listbox:
+            self._queue_listbox.delete(0, tk.END)
+
+        self.log(f"Cleared queue ({count} item{'s' if count != 1 else ''}).")
 
     def build_queued_workbook(self):
         if not self._queue:
