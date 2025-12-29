@@ -2,12 +2,9 @@
 import tkinter as tk
 from tkinter import ttk
 
-# --- Update these imports to match your project files/classes ---
-# Example possibilities:
-# from gui.tab_case import CaseProcessingTab
-# from gui.tab_compare import CompareTab
 from gui.tab_case import CaseProcessingTab
 from gui.tab_compare import CompareTab
+from gui.help_view import HelpTab  # NEW
 
 
 APP_TITLE = "Contingency Comparison Tool"
@@ -117,7 +114,7 @@ class App(ttk.Frame):
         body = ttk.Frame(self.master, padding=(12, 12))
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # Notebook with two tabs
+        # Notebook with tabs
         self.notebook = ttk.Notebook(body)
         self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -129,12 +126,19 @@ class App(ttk.Frame):
         self.tab_compare = ttk.Frame(self.notebook, padding=(8, 8))
         self.notebook.add(self.tab_compare, text="Compare Cases")
 
+        # --- Tab 3: Help ---
+        self.tab_help = ttk.Frame(self.notebook, padding=(8, 8))
+        self.notebook.add(self.tab_help, text="Help")
+
         # Mount your existing tab classes inside these frames
         self.case_processing_view = CaseProcessingTab(self.tab_case)
         self.case_processing_view.pack(fill=tk.BOTH, expand=True)
 
         self.compare_view = CompareTab(self.tab_compare)
         self.compare_view.pack(fill=tk.BOTH, expand=True)
+
+        self.help_view = HelpTab(self.tab_help)  # NEW
+        self.help_view.pack(fill=tk.BOTH, expand=True)
 
         # Optional: If your tab classes support external logging / status hooks
         # you can wire them up here without breaking anything.
@@ -171,7 +175,7 @@ class App(ttk.Frame):
         - If tabs want status updates, they can call self.master_app.set_status(...)
         """
         # Give tabs a reference to the app if they want to call set_status()
-        for view in (self.case_processing_view, self.compare_view):
+        for view in (self.case_processing_view, self.compare_view, self.help_view):
             try:
                 view.master_app = self
             except Exception:
