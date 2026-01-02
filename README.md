@@ -14,3 +14,57 @@ py -m PyInstaller --noconfirm --clean --onedir --windowed --name ContingencyComp
   --add-data "assets\app.ico;assets" `
   --add-data "assets\app_256.png;assets" `
   main.py
+
+fast onedir
+a = Analysis(
+    ['ContingencyComparaterV2.py'],
+    pathex=['.'],
+    binaries=[],
+    datas=[('assets', 'assets')],
+    hiddenimports=[],
+    excludes=['matplotlib', 'IPython'],
+    optimize=2,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='ContingencyComparaterV2',
+    icon='assets/app.ico',
+    console=False,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    name='ContingencyComparaterV2',
+)
+
+clean onedir
+a = Analysis(
+    ['ContingencyComparaterV2.py'],
+    pathex=['.'],
+    binaries=[],
+    datas=[('assets', 'assets')],
+    hiddenimports=[],
+    excludes=['matplotlib'],
+    optimize=2,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='ContingencyComparaterV2',
+    icon='assets/app.ico',
+    console=False,
+    upx=False,
+)
