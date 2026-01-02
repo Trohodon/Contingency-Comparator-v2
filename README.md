@@ -15,7 +15,11 @@ py -m PyInstaller --noconfirm --clean --onedir --windowed --name ContingencyComp
   --add-data "assets\app_256.png;assets" `
   main.py
 
+
+
 fast onedir
+
+
 a = Analysis(
     ['ContingencyComparaterV2.py'],
     pathex=['.'],
@@ -45,7 +49,11 @@ coll = COLLECT(
     name='ContingencyComparaterV2',
 )
 
+
+
 clean onedir
+
+
 a = Analysis(
     ['ContingencyComparaterV2.py'],
     pathex=['.'],
