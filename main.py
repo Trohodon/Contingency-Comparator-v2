@@ -1,6 +1,8 @@
 # main.py
 import os
+import sys
 import tkinter as tk
+
 from gui.app import App
 
 
@@ -22,9 +24,12 @@ def main():
     # ---- App icon (top-left + taskbar) ----
     ico_path = resource_path("assets/app.ico")
     if os.path.exists(ico_path):
-        root.iconbitmap(ico_path)
+        try:
+            root.iconbitmap(ico_path)
+        except Exception:
+            pass  # if Windows can't apply it for some reason, don't crash
 
-    app = App(root)
+    App(root)  # App handles packing/frames internally in your version
     root.mainloop()
 
 
