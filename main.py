@@ -1,62 +1,75 @@
+# main.py
+# Entry point for the Contingency Comparison Tool (DCC)
+# - Sets Windows app icon (titlebar/taskbar) from assets/app.ico
+# - Shows PyInstaller splash (if built with --splash) and closes it when Tk is ready
+# - Handles normal runs AND PyInstaller onefile/onedir runs via resource_path()
+
 import os
 import sys
 import tkinter as tk
-import ctypes
 
 from gui.app import App
 
 
 def resource_path(relative_path: str) -> str:
     """
+    Return an absolute path to a resource.
     Works for:
-      - normal runs
-      - PyInstaller --onefile (sys._MEIPASS)
-      - PyInstaller --onedir
+      - normal python runs
+      - PyInstaller --onefile / --onedir runs
     """
     try:
+        # PyInstaller extraction/temporary folder
         base_path = sys._MEIPASS  # type: ignore[attr-defined]
     except Exception:
+        # Folder containing this file
         base_path = os.path.dirname(os.path.abspath(__file__))
 
     return os.path.join(base_path, relative_path)
 
 
-def set_windows_app_user_model_id(app_id: str):
+def _set_app_icon(root: tk.Tk):
     """
-    Forces Windows to use THIS app identity for taskbar grouping + icon.
-    Call BEFORE tk.Tk().
+    Set the top-left window icon + (often) taskbar icon on Windows.
+    Notes:
+      - .ico is best on Windows.
+      - Taskbar behavior can vary when running from python vs packaged exe.
+      - For packaged exe, ALSO pass --icon=... to PyInstaller (you already are).
     """
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
-    except Exception:
-        pass
-
-
-def main():
-    # 1) Taskbar identity (helps Windows stop using python default)
-    set_windows_app_user_model_id("DCC.ContingencyComparatorV2")
-
-    # 2) Build root
-    root = tk.Tk()
-
-    # 3) Set icon for title bar + taskbar button
     ico_path = resource_path(os.path.join("assets", "app.ico"))
     if os.path.exists(ico_path):
         try:
             root.iconbitmap(ico_path)
         except Exception:
+            # Some environments may fail iconbitmap; ignore gracefully
             pass
 
-    # 4) (Optional but often helps) also set iconphoto from PNG
-    png_path = resource_path(os.path.join("assets", "app_256.png"))
-    if os.path.exists(png_path):
-        try:
-            img = tk.PhotoImage(file=png_path)
-            root.iconphoto(True, img)  # True = apply to all windows
-        except Exception:
-            pass
 
+def _close_pyinstaller_splash():
+    """
+    If built with PyInstaller --splash, close it once Tk is up.
+    Safe no-op for normal python runs.
+    """
+    try:
+        import pyi_splash  # type: ignore
+        pyi_splash.close()
+    except Exception:
+        pass
+
+
+def main():
+    root = tk.Tk()
+
+    # Set icon ASAP (top-left + often taskbar)
+    _set_app_icon(root)
+
+    # If we launched with PyInstaller splash, close it now that Tk exists
+    _close_pyinstaller_splash()
+
+    # Build and run app
     app = App(root)
+    app.pack(fill="both", expand=True)
+
     root.mainloop()
 
 
