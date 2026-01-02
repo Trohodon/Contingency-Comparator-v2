@@ -126,3 +126,13 @@ coll = COLLECT(
     upx_exclude=[],
     name='ContingencyComparaterV2',
 )
+
+
+
+
+
+cd dist\ContingencyComparaterV2
+gci _internal -Directory | % {
+  $size = (gci $_.FullName -Recurse -File | measure Length -Sum).Sum
+  [pscustomobject]@{Name=$_.Name; MB=[math]::Round($size/1MB,1)}
+} | sort MB -desc | select -first 25
