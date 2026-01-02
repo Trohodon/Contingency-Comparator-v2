@@ -1,5 +1,5 @@
 # tools/icon_builder.py
-# Utility-pole icon generator for Dominion Contingency Comparator
+# Illustrated sunset powerline icon generator (vector-ish, aesthetic)
 # Outputs:
 #   - assets/app.ico     (Windows icon, multi-size)
 #   - assets/app_256.png (preview)
@@ -13,39 +13,42 @@ from PIL import Image, ImageDraw, ImageFilter
 
 SIZES = [16, 24, 32, 48, 64, 128, 256]
 
-# Professional palette (no neon)
-SKY_TOP = (18, 46, 92, 255)
-SKY_MID = (32, 78, 140, 255)
-SKY_BOT = (110, 165, 210, 255)
+# --- Sunset palette (inspired by your reference image) ---
+SKY_TOP   = (180, 60, 70, 255)     # dusky red
+SKY_MID   = (235, 130, 60, 255)    # orange
+SKY_BOT   = (255, 225, 145, 255)   # warm yellow
 
-POLE = (32, 36, 44, 255)         # dark charcoal
-POLE_EDGE = (255, 255, 255, 55)  # subtle highlight stroke
-WIRE = (28, 30, 36, 230)
-WIRE_HI = (255, 255, 255, 35)
-INSULATOR = (70, 78, 92, 255)
-INSULATOR_HI = (255, 255, 255, 60)
+CLOUD_1   = (245, 150, 90, 255)    # darker cloud
+CLOUD_2   = (255, 190, 115, 255)   # lighter cloud
+CLOUD_3   = (255, 215, 150, 255)   # highlight cloud
 
-def lerp(a, b, t: float):
+FIELD_DK  = (70, 150, 90, 255)     # green
+FIELD_LT  = (115, 195, 115, 255)   # bright green stripe
+FIELD_MID = (95, 175, 105, 255)
+
+POLE_1    = (60, 80, 80, 255)      # teal-ish pole
+POLE_2    = (45, 55, 60, 255)      # shadow
+POLE_WOOD = (85, 55, 40, 255)      # wood (for distant poles)
+
+WIRE      = (25, 25, 28, 235)
+WIRE_HI   = (255, 255, 255, 25)
+
+def lerp(a, b, t: float) -> int:
     return int(a + (b - a) * t)
 
 def lerp_rgba(c1, c2, t: float):
-    return (
-        lerp(c1[0], c2[0], t),
-        lerp(c1[1], c2[1], t),
-        lerp(c1[2], c2[2], t),
-        lerp(c1[3], c2[3], t),
-    )
+    return (lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t), lerp(c1[3], c2[3], t))
 
 def vertical_gradient(w: int, h: int, top, mid, bottom):
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     px = img.load()
     for y in range(h):
-        t = y / max(1, (h - 1))
-        if t < 0.60:
-            tt = t / 0.60
+        t = y / max(1, h - 1)
+        if t < 0.55:
+            tt = t / 0.55
             c = lerp_rgba(top, mid, tt)
         else:
-            tt = (t - 0.60) / 0.40
+            tt = (t - 0.55) / 0.45
             c = lerp_rgba(mid, bottom, tt)
         for x in range(w):
             px[x, y] = c
@@ -62,136 +65,191 @@ def rounded_tile(size: int, pad: int, radius: int, bg: Image.Image):
     td.rounded_rectangle(
         (pad, pad, size - pad, size - pad),
         radius=radius,
-        outline=(255, 255, 255, 45),
+        outline=(255, 255, 255, 50),
         width=max(1, size // 96),
     )
     return tile
 
-def sag_y(x, x0, x1, y0, sag):
-    """
-    Simple parabola sag: y = y0 + sag * (1 - ((2t-1)^2))
-    so it sags most at center and is y0 at ends.
-    """
-    if x1 == x0:
-        return y0
-    t = (x - x0) / (x1 - x0)
-    p = (2 * t - 1)
-    return y0 + sag * (1 - p * p)
+def add_vignette(img: Image.Image, strength: int):
+    w, h = img.size
+    v = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(v)
+    r = int(min(w, h) * 0.88)
+    cx, cy = int(w * 0.5), int(h * 0.55)
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(0, 0, 0, strength))
+    v = v.filter(ImageFilter.GaussianBlur(max(1, w // 14)))
+    return Image.alpha_composite(img, v)
 
-def draw_wire(d: ImageDraw.ImageDraw, x0, x1, y0, sag, width, color, hi=False):
+def sag_curve_points(x0, x1, y0, sag, steps):
     pts = []
-    steps = max(16, int((x1 - x0) / 6))
     for i in range(steps + 1):
-        x = x0 + (x1 - x0) * (i / steps)
-        y = sag_y(x, x0, x1, y0, sag)
+        t = i / steps
+        x = x0 + (x1 - x0) * t
+        p = 2 * t - 1
+        y = y0 + sag * (1 - p * p)
         pts.append((int(x), int(y)))
-    d.line(pts, fill=color, width=width)
-    if hi and width >= 2:
-        d.line([(px, py - 1) for (px, py) in pts], fill=WIRE_HI, width=max(1, width // 2))
+    return pts
 
-def draw_pole_icon(size: int) -> Image.Image:
-    pad = max(2, size // 18)
-    radius = max(5, size // 5)
+def draw_wire(draw: ImageDraw.ImageDraw, x0, x1, y0, sag, width, hi=True):
+    steps = max(20, int((x1 - x0) / 18))
+    pts = sag_curve_points(x0, x1, y0, sag, steps)
+    draw.line(pts, fill=WIRE, width=width)
+    if hi and width >= 2:
+        draw.line([(x, y - 1) for (x, y) in pts], fill=WIRE_HI, width=max(1, width // 2))
+
+def blob_cloud(draw: ImageDraw.ImageDraw, x, y, w, h, color):
+    # simple “cloud” blob with 3-4 circles
+    r1 = int(h * 0.55)
+    r2 = int(h * 0.70)
+    r3 = int(h * 0.60)
+    draw.ellipse((x + int(w*0.00), y + int(h*0.25), x + int(w*0.35), y + int(h*0.95)), fill=color)
+    draw.ellipse((x + int(w*0.20), y + int(h*0.05), x + int(w*0.60), y + int(h*0.85)), fill=color)
+    draw.ellipse((x + int(w*0.45), y + int(h*0.20), x + int(w*0.85), y + int(h*0.95)), fill=color)
+    # base band
+    draw.rounded_rectangle((x + int(w*0.05), y + int(h*0.45), x + int(w*0.85), y + int(h*0.98)),
+                           radius=int(h*0.25), fill=color)
+
+def draw_pole(draw: ImageDraw.ImageDraw, x, y_top, y_bot, w, cross_y, cross_len, style="teal", detail=True):
+    # pole body (slight taper)
+    taper = max(1, int(w * 0.18))
+    x0 = x - w//2
+    x1 = x + w//2
+    poly = [(x0, y_bot), (x1, y_bot), (x1 - taper, y_top), (x0 + taper, y_top)]
+    if style == "wood":
+        base = POLE_WOOD
+        shadow = (60, 35, 25, 255)
+        highlight = (255, 255, 255, 25)
+    else:
+        base = POLE_1
+        shadow = POLE_2
+        highlight = (255, 255, 255, 30)
+
+    # shadow underlay
+    draw.polygon([(p[0] + 2, p[1] + 2) for p in poly], fill=(0, 0, 0, 70))
+    # main
+    draw.polygon(poly, fill=base)
+    # right shadow strip
+    draw.polygon([(x1 - int(w*0.15), y_bot), (x1, y_bot), (x1 - taper, y_top), (x1 - taper - int(w*0.12), y_top)], fill=shadow)
+    # subtle highlight
+    draw.line([(x0 + int(w*0.12), y_top + 3), (x0 + int(w*0.12), y_bot - 3)], fill=highlight, width=max(1, w//6))
+
+    # crossarm
+    arm_h = max(2, w//3)
+    ax0 = x - cross_len//2
+    ax1 = x + cross_len//2
+    draw.rounded_rectangle((ax0, cross_y - arm_h//2, ax1, cross_y + arm_h//2),
+                           radius=arm_h//2, fill=base)
+    draw.line([(ax0, cross_y + arm_h//2 - 1), (ax1, cross_y + arm_h//2 - 1)], fill=(0, 0, 0, 80), width=1)
+
+    if detail:
+        # insulators (small caps)
+        ins_r = max(2, w//3)
+        for ix in [ax0 + int(cross_len*0.2), x, ax1 - int(cross_len*0.2)]:
+            draw.ellipse((ix - ins_r, cross_y - ins_r - arm_h//2,
+                          ix + ins_r, cross_y + ins_r - arm_h//2),
+                         fill=(230, 235, 240, 255))
+            draw.ellipse((ix - ins_r + 1, cross_y - ins_r - arm_h//2 + 1,
+                          ix + ins_r - 1, cross_y + ins_r - arm_h//2 - 1),
+                         outline=(0, 0, 0, 60), width=1)
+
+def make_icon(target: int) -> Image.Image:
+    # Oversample for clean vector edges
+    scale = 4
+    size = target * scale
+    pad = max(6, size // 22)
+    radius = max(18, size // 5)
 
     # Background
     bg = vertical_gradient(size, size, SKY_TOP, SKY_MID, SKY_BOT)
 
-    # subtle vignette for contrast
-    vig = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    vd = ImageDraw.Draw(vig)
-    r = int(size * 0.72)
-    cx, cy = int(size * 0.50), int(size * 0.45)
-    vd.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(0, 0, 0, 55))
-    vig = vig.filter(ImageFilter.GaussianBlur(max(1, size // 16)))
-    bg = Image.alpha_composite(bg, vig)
+    # Clouds (layered)
+    clouds = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    cd = ImageDraw.Draw(clouds)
 
+    # cloud band positions tuned for the reference vibe
+    blob_cloud(cd, int(size*0.05), int(size*0.18), int(size*0.55), int(size*0.18), CLOUD_1)
+    blob_cloud(cd, int(size*0.35), int(size*0.22), int(size*0.65), int(size*0.20), CLOUD_2)
+    blob_cloud(cd, int(size*0.10), int(size*0.30), int(size*0.70), int(size*0.22), CLOUD_2)
+    blob_cloud(cd, int(size*0.40), int(size*0.34), int(size*0.58), int(size*0.20), CLOUD_3)
+
+    clouds = clouds.filter(ImageFilter.GaussianBlur(max(1, size // 260)))
+    bg = Image.alpha_composite(bg, clouds)
+
+    # Field
+    field = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    fd = ImageDraw.Draw(field)
+    horizon = int(size * 0.62)
+    fd.rectangle((0, horizon, size, size), fill=FIELD_DK)
+
+    # angled stripes
+    stripe_w = int(size * 0.10)
+    for i in range(-2, 14):
+        x0 = int(i * stripe_w)
+        fd.polygon([(x0, size), (x0 + stripe_w, size), (x0 + int(stripe_w*2.0), horizon), (x0 + int(stripe_w*1.0), horizon)],
+                   fill=FIELD_MID if i % 2 == 0 else FIELD_LT)
+    # soften a bit
+    field = field.filter(ImageFilter.GaussianBlur(max(0, size // 700)))
+    bg = Image.alpha_composite(bg, field)
+
+    # Clip to rounded app tile + subtle vignette
     tile = rounded_tile(size, pad, radius, bg)
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    img = Image.alpha_composite(img, tile)
+    tile = add_vignette(tile, strength=50)
 
-    d = ImageDraw.Draw(img)
+    # Foreground drawing
+    fg = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(fg)
 
-    # Detail level
-    tiny = size <= 24
+    # Complexity decisions
+    tiny = target <= 24
+    small = target <= 32
 
-    # Geometry
-    x_center = int(size * 0.50)
-    pole_top = int(size * 0.18)
-    pole_bot = int(size * 0.88)
-    pole_w = max(2, int(size * (0.10 if not tiny else 0.14)))
-    half_w = pole_w // 2
+    # Big pole (foreground)
+    pole_x = int(size * 0.60)
+    pole_top = int(size * 0.16)
+    pole_bot = int(size * 0.93)
+    pole_w = int(size * (0.09 if not tiny else 0.12))
+    cross_y = int(size * 0.30)
+    cross_len = int(size * 0.55)
 
-    # Crossarm
-    arm_y = int(size * 0.32)
-    arm_len = int(size * (0.62 if not tiny else 0.70))
-    arm_h = max(2, size // 28)
+    # Distant poles (depth) — only when we have room
+    if target >= 64:
+        # a few small poles receding left
+        for k in range(4):
+            t = k / 3
+            x = int(lerp(int(size*0.12), int(size*0.42), t))
+            yb = int(lerp(int(size*0.90), int(size*0.75), t))
+            yt = int(lerp(int(size*0.55), int(size*0.40), t))
+            w = int(lerp(int(size*0.022), int(size*0.045), t))
+            cy = int(lerp(int(size*0.50), int(size*0.36), t))
+            clen = int(lerp(int(size*0.16), int(size*0.30), t))
+            draw_pole(d, x, yt, yb, w, cy, clen, style="wood", detail=False)
 
-    arm_x0 = x_center - arm_len // 2
-    arm_x1 = x_center + arm_len // 2
+    # Wires (perspective sweep)
+    wire_w = max(3, size // 160)
+    x0 = -int(size * 0.10)
+    x1 = int(size * 1.10)
+    base_y = int(size * 0.10)
+    for i in range(5):
+        y = base_y + int(size * 0.06) * i
+        sag = int(size * 0.015) + i * int(size * 0.004)
+        draw_wire(d, x0, x1, y, sag, wire_w, hi=not tiny)
 
-    # Wires
-    wire_y_base = arm_y - int(size * 0.02)
-    sag = max(1, int(size * (0.035 if not tiny else 0.025)))
-    wire_w = max(1, size // 56)
+    # Big pole on top (so it intersects wires cleanly)
+    draw_pole(d, pole_x, pole_top, pole_bot, pole_w, cross_y, cross_len, style="teal", detail=(not tiny))
 
-    # draw wires behind pole
-    draw_wire(d, pad, size - pad, wire_y_base, sag, wire_w, WIRE, hi=not tiny)
-    draw_wire(d, pad, size - pad, wire_y_base + int(size * 0.06), sag + int(size * 0.01), wire_w, WIRE, hi=not tiny)
-    draw_wire(d, pad, size - pad, wire_y_base + int(size * 0.12), sag + int(size * 0.02), wire_w, WIRE, hi=not tiny)
+    # slight polish blur to avoid jaggies, then sharpen on downscale
+    if target <= 32:
+        fg = fg.filter(ImageFilter.GaussianBlur(0.45))
+    else:
+        fg = fg.filter(ImageFilter.GaussianBlur(0.25))
 
-    # Pole (main shaft) with slight taper
-    pole_poly = [
-        (x_center - half_w - int(size * 0.01), pole_bot),
-        (x_center + half_w + int(size * 0.01), pole_bot),
-        (x_center + half_w, pole_top),
-        (x_center - half_w, pole_top),
-    ]
-    d.polygon(pole_poly, fill=POLE)
+    img = Image.alpha_composite(tile, fg)
 
-    # Highlight edge
-    if size >= 32:
-        d.line([(x_center - half_w, pole_top), (x_center - half_w - 1, pole_bot)], fill=POLE_EDGE, width=max(1, size // 128))
-
-    # Crossarm
-    d.rounded_rectangle((arm_x0, arm_y - arm_h // 2, arm_x1, arm_y + arm_h // 2),
-                        radius=max(1, arm_h // 2),
-                        fill=POLE)
-
-    # Insulators (3)
-    if not tiny:
-        ins_r = max(2, size // 40)
-        xs = [arm_x0 + int(arm_len * 0.18), x_center, arm_x1 - int(arm_len * 0.18)]
-        for ix in xs:
-            # base
-            d.ellipse((ix - ins_r, arm_y - ins_r, ix + ins_r, arm_y + ins_r), fill=INSULATOR)
-            # top highlight
-            d.ellipse((ix - ins_r + 1, arm_y - ins_r + 1, ix + ins_r - 1, arm_y + ins_r - 1),
-                      outline=INSULATOR_HI, width=1)
-
-        # small “hardware” bolts
-        bolt_r = max(1, size // 110)
-        d.ellipse((x_center - bolt_r, arm_y + arm_h // 2 + 2 - bolt_r,
-                   x_center + bolt_r, arm_y + arm_h // 2 + 2 + bolt_r), fill=(255, 255, 255, 80))
-
-    # Simple transformer box (optional, only when large enough)
-    if size >= 64:
-        box_w = int(size * 0.14)
-        box_h = int(size * 0.12)
-        bx0 = x_center + half_w + int(size * 0.03)
-        by0 = int(size * 0.52)
-        d.rounded_rectangle((bx0, by0, bx0 + box_w, by0 + box_h),
-                            radius=max(2, size // 64),
-                            fill=(42, 46, 56, 255),
-                            outline=(255, 255, 255, 45),
-                            width=max(1, size // 160))
-        # strap
-        d.line([(bx0, by0 + box_h // 2), (bx0 + box_w, by0 + box_h // 2)], fill=(255, 255, 255, 35), width=max(1, size // 200))
-
-    # Slight soften at tiny sizes to reduce jaggies
-    if size <= 32:
-        img = img.filter(ImageFilter.GaussianBlur(0.25))
-    # Sharpen for big sizes
-    if size >= 64:
+    # Final: downsample to target
+    img = img.resize((target, target), resample=Image.Resampling.LANCZOS)
+    if target <= 32:
+        img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=150, threshold=2))
+    elif target >= 64:
         img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=120, threshold=2))
 
     return img
@@ -205,15 +263,12 @@ def main():
     ico_path = os.path.join(out_dir, "app.ico")
     png_path = os.path.join(out_dir, "app_256.png")
 
-    images = [draw_pole_icon(s) for s in SIZES]
+    images = [make_icon(s) for s in SIZES]
 
-    # preview
     images[-1].save(png_path, format="PNG")
-
-    # multi-size ico
     images[0].save(ico_path, format="ICO", sizes=[(s, s) for s in SIZES])
 
-    print("Utility-pole icon generated:")
+    print("Illustrated sunset pole icon generated:")
     print(" -", ico_path)
     print(" -", png_path)
 
