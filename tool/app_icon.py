@@ -1,5 +1,5 @@
 # tools/icon_builder.py
-# Modern icon generator for: Dominion Contingency Comparator (DCC)
+# Utility-pole icon generator for Dominion Contingency Comparator
 # Outputs:
 #   - assets/app.ico     (Windows icon, multi-size)
 #   - assets/app_256.png (preview)
@@ -8,19 +8,22 @@
 #   py -m pip install pillow --user
 
 import os
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import math
+from PIL import Image, ImageDraw, ImageFilter
 
 SIZES = [16, 24, 32, 48, 64, 128, 256]
 
-# ---------- Professional "grid + compare" palette ----------
-NAVY0 = (8, 18, 38, 255)         # deep navy
-NAVY1 = (14, 42, 92, 255)        # dominion-like blue
-NAVY2 = (24, 74, 140, 255)       # lighter blue
-STEEL = (210, 220, 235, 255)     # light steel
-WHITE = (245, 248, 255, 255)
-ACCENT = (255, 170, 40, 255)     # warm accent (warning/contingency)
-ACCENT2 = (255, 110, 80, 255)    # secondary accent
-INK = (0, 0, 0, 255)
+# Professional palette (no neon)
+SKY_TOP = (18, 46, 92, 255)
+SKY_MID = (32, 78, 140, 255)
+SKY_BOT = (110, 165, 210, 255)
+
+POLE = (32, 36, 44, 255)         # dark charcoal
+POLE_EDGE = (255, 255, 255, 55)  # subtle highlight stroke
+WIRE = (28, 30, 36, 230)
+WIRE_HI = (255, 255, 255, 35)
+INSULATOR = (70, 78, 92, 255)
+INSULATOR_HI = (255, 255, 255, 60)
 
 def lerp(a, b, t: float):
     return int(a + (b - a) * t)
@@ -48,76 +51,13 @@ def vertical_gradient(w: int, h: int, top, mid, bottom):
             px[x, y] = c
     return img
 
-def soft_radial_glow(size: int, center, radius, color_rgba):
-    glow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(glow)
-    cx, cy = center
-    r = radius
-    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=color_rgba)
-    glow = glow.filter(ImageFilter.GaussianBlur(max(1, size // 18)))
-    return glow
-
-def rounded_tile_mask(size: int, pad: int, radius: int):
-    m = Image.new("L", (size, size), 0)
-    d = ImageDraw.Draw(m)
-    d.rounded_rectangle((pad, pad, size - pad, size - pad), radius=radius, fill=255)
-    return m
-
-def load_font(size: int):
-    # Prefer Windows UI fonts; fall back safely.
-    candidates = [
-        ("segoeuib.ttf", int(size * 0.30)),
-        ("seguisb.ttf", int(size * 0.30)),
-        ("arialbd.ttf", int(size * 0.30)),
-        ("arial.ttf", int(size * 0.30)),
-    ]
-    for name, pt in candidates:
-        try:
-            return ImageFont.truetype(name, max(10, pt))
-        except Exception:
-            pass
-    return ImageFont.load_default()
-
-def text_size(draw: ImageDraw.ImageDraw, text: str, font):
-    try:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        return bbox[2] - bbox[0], bbox[3] - bbox[1]
-    except Exception:
-        try:
-            return font.getsize(text)
-        except Exception:
-            return (len(text) * 8, 12)
-
-def draw_shadowed_line(d: ImageDraw.ImageDraw, p1, p2, width, color, shadow_alpha=70, shadow_offset=1):
-    # subtle shadow for contrast on small sizes
-    sx, sy = shadow_offset, shadow_offset
-    d.line([(p1[0] + sx, p1[1] + sy), (p2[0] + sx, p2[1] + sy)], fill=(0, 0, 0, shadow_alpha), width=width)
-    d.line([p1, p2], fill=color, width=width)
-
-def draw_node(d: ImageDraw.ImageDraw, x, y, r, fill, outline=None, ow=1, shadow=True):
-    if shadow:
-        d.ellipse((x - r + 1, y - r + 1, x + r + 1, y + r + 1), fill=(0, 0, 0, 80))
-    d.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=outline, width=ow)
-
-def make_icon(size: int) -> Image.Image:
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-
-    pad = max(2, size // 18)
-    radius = max(5, size // 5)
-
-    # ----- Background tile -----
-    bg = vertical_gradient(size, size, NAVY0, NAVY1, NAVY2)
-
-    # soft highlight glow (top-left) + contingency glow (bottom-right)
-    bg = Image.alpha_composite(bg, soft_radial_glow(size, (int(size * 0.30), int(size * 0.28)), int(size * 0.42), (255, 255, 255, 35)))
-    bg = Image.alpha_composite(bg, soft_radial_glow(size, (int(size * 0.80), int(size * 0.80)), int(size * 0.45), (255, 170, 40, 18)))
-
-    # clip to rounded tile
+def rounded_tile(size: int, pad: int, radius: int, bg: Image.Image):
     tile = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    mask = rounded_tile_mask(size, pad, radius)
+    mask = Image.new("L", (size, size), 0)
+    md = ImageDraw.Draw(mask)
+    md.rounded_rectangle((pad, pad, size - pad, size - pad), radius=radius, fill=255)
     tile.paste(bg, (0, 0), mask)
 
-    # subtle border
     td = ImageDraw.Draw(tile)
     td.rounded_rectangle(
         (pad, pad, size - pad, size - pad),
@@ -125,154 +65,132 @@ def make_icon(size: int) -> Image.Image:
         outline=(255, 255, 255, 45),
         width=max(1, size // 96),
     )
+    return tile
 
+def sag_y(x, x0, x1, y0, sag):
+    """
+    Simple parabola sag: y = y0 + sag * (1 - ((2t-1)^2))
+    so it sags most at center and is y0 at ends.
+    """
+    if x1 == x0:
+        return y0
+    t = (x - x0) / (x1 - x0)
+    p = (2 * t - 1)
+    return y0 + sag * (1 - p * p)
+
+def draw_wire(d: ImageDraw.ImageDraw, x0, x1, y0, sag, width, color, hi=False):
+    pts = []
+    steps = max(16, int((x1 - x0) / 6))
+    for i in range(steps + 1):
+        x = x0 + (x1 - x0) * (i / steps)
+        y = sag_y(x, x0, x1, y0, sag)
+        pts.append((int(x), int(y)))
+    d.line(pts, fill=color, width=width)
+    if hi and width >= 2:
+        d.line([(px, py - 1) for (px, py) in pts], fill=WIRE_HI, width=max(1, width // 2))
+
+def draw_pole_icon(size: int) -> Image.Image:
+    pad = max(2, size // 18)
+    radius = max(5, size // 5)
+
+    # Background
+    bg = vertical_gradient(size, size, SKY_TOP, SKY_MID, SKY_BOT)
+
+    # subtle vignette for contrast
+    vig = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    vd = ImageDraw.Draw(vig)
+    r = int(size * 0.72)
+    cx, cy = int(size * 0.50), int(size * 0.45)
+    vd.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(0, 0, 0, 55))
+    vig = vig.filter(ImageFilter.GaussianBlur(max(1, size // 16)))
+    bg = Image.alpha_composite(bg, vig)
+
+    tile = rounded_tile(size, pad, radius, bg)
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     img = Image.alpha_composite(img, tile)
 
-    # ----- Foreground: "compare panels" + "grid one-line" -----
-    fg = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(fg)
+    d = ImageDraw.Draw(img)
 
-    # layout box
-    left = int(size * 0.14)
-    top = int(size * 0.18)
-    right = int(size * 0.86)
-    bottom = int(size * 0.82)
-
-    # panel background
-    panel_r = max(3, size // 14)
-    d.rounded_rectangle((left, top, right, bottom), radius=panel_r, fill=(255, 255, 255, 18), outline=(255, 255, 255, 30), width=max(1, size // 128))
-
-    # split line
-    split_x = int(size * 0.51)
-    d.line([(split_x, top + int(size * 0.03)), (split_x, bottom - int(size * 0.03))],
-           fill=(255, 255, 255, 28), width=max(1, size // 128))
-
-    # Decide detail level
+    # Detail level
     tiny = size <= 24
-    small = size <= 32
 
-    # --- Compare arrows + Δ (core "Comparator" idea) ---
-    arrow_w = max(1, size // 64) if (tiny or small) else max(2, size // 72)
-    mid_y = int(size * 0.50)
+    # Geometry
+    x_center = int(size * 0.50)
+    pole_top = int(size * 0.18)
+    pole_bot = int(size * 0.88)
+    pole_w = max(2, int(size * (0.10 if not tiny else 0.14)))
+    half_w = pole_w // 2
 
-    # left->right arrow
-    ax1 = int(size * 0.32)
-    ax2 = int(size * 0.70)
-    draw_shadowed_line(d, (ax1, mid_y - int(size * 0.11)), (ax2, mid_y - int(size * 0.11)), arrow_w, (255, 255, 255, 190), shadow_alpha=60, shadow_offset=1)
-    d.polygon([(ax2, mid_y - int(size * 0.11)),
-               (ax2 - int(size * 0.05), mid_y - int(size * 0.14)),
-               (ax2 - int(size * 0.05), mid_y - int(size * 0.08))],
-              fill=(255, 255, 255, 200))
+    # Crossarm
+    arm_y = int(size * 0.32)
+    arm_len = int(size * (0.62 if not tiny else 0.70))
+    arm_h = max(2, size // 28)
 
-    # right->left arrow (slightly lower)
-    draw_shadowed_line(d, (ax2, mid_y + int(size * 0.11)), (ax1, mid_y + int(size * 0.11)), arrow_w, (255, 255, 255, 150), shadow_alpha=45, shadow_offset=1)
-    d.polygon([(ax1, mid_y + int(size * 0.11)),
-               (ax1 + int(size * 0.05), mid_y + int(size * 0.08)),
-               (ax1 + int(size * 0.05), mid_y + int(size * 0.14))],
-              fill=(255, 255, 255, 160))
+    arm_x0 = x_center - arm_len // 2
+    arm_x1 = x_center + arm_len // 2
 
-    # Δ mark (difference)
-    if not tiny:
-        font = load_font(size)
-        delta = "Δ"
-        tw, th = text_size(d, delta, font)
-        dx = int(size * 0.51 - tw / 2)
-        dy = int(size * 0.50 - th / 2)
-        # shadow + accent
-        d.text((dx + 1, dy + 1), delta, font=font, fill=(0, 0, 0, 120))
-        d.text((dx, dy), delta, font=font, fill=ACCENT)
+    # Wires
+    wire_y_base = arm_y - int(size * 0.02)
+    sag = max(1, int(size * (0.035 if not tiny else 0.025)))
+    wire_w = max(1, size // 56)
 
-    # --- One-line grid motif (left panel) ---
-    # Keep it readable: 4 buses + lines
-    line_w = max(1, size // 48) if small else max(2, size // 56)
+    # draw wires behind pole
+    draw_wire(d, pad, size - pad, wire_y_base, sag, wire_w, WIRE, hi=not tiny)
+    draw_wire(d, pad, size - pad, wire_y_base + int(size * 0.06), sag + int(size * 0.01), wire_w, WIRE, hi=not tiny)
+    draw_wire(d, pad, size - pad, wire_y_base + int(size * 0.12), sag + int(size * 0.02), wire_w, WIRE, hi=not tiny)
 
-    # coordinates in left panel
-    lx0, lx1 = left + int(size * 0.06), split_x - int(size * 0.06)
-    ly0, ly1 = top + int(size * 0.08), bottom - int(size * 0.08)
-
-    # nodes
-    n1 = (int(lx0), int(ly0 + (ly1 - ly0) * 0.20))
-    n2 = (int(lx1), int(ly0 + (ly1 - ly0) * 0.28))
-    n3 = (int(lx0 + (lx1 - lx0) * 0.35), int(ly0 + (ly1 - ly0) * 0.60))
-    n4 = (int(lx1), int(ly0 + (ly1 - ly0) * 0.72))
-
-    # lines
-    if not tiny:
-        draw_shadowed_line(d, n1, n2, line_w, (210, 220, 235, 200))
-        draw_shadowed_line(d, n1, n3, line_w, (210, 220, 235, 180))
-        draw_shadowed_line(d, n3, n4, line_w, (210, 220, 235, 180))
-        draw_shadowed_line(d, n2, n4, line_w, (210, 220, 235, 140))
-
-    # nodes
-    r_node = max(2, size // 22)
-    for (x, y) in [n1, n2, n3, n4]:
-        draw_node(d, x, y, r_node, fill=WHITE, outline=(255, 255, 255, 120), ow=max(1, size // 160), shadow=True)
-
-    # --- Contingency indicator (right panel): warning spark + result bars ---
-    rx0, rx1 = split_x + int(size * 0.06), right - int(size * 0.06)
-    ry0, ry1 = top + int(size * 0.10), bottom - int(size * 0.10)
-
-    # simplified for tiny sizes: just a bolt mark
-    bolt = [
-        (int(rx0 + (rx1 - rx0) * 0.40), int(ry0 + (ry1 - ry0) * 0.05)),
-        (int(rx0 + (rx1 - rx0) * 0.58), int(ry0 + (ry1 - ry0) * 0.38)),
-        (int(rx0 + (rx1 - rx0) * 0.50), int(ry0 + (ry1 - ry0) * 0.38)),
-        (int(rx0 + (rx1 - rx0) * 0.66), int(ry0 + (ry1 - ry0) * 0.85)),
-        (int(rx0 + (rx1 - rx0) * 0.42), int(ry0 + (ry1 - ry0) * 0.52)),
-        (int(rx0 + (rx1 - rx0) * 0.52), int(ry0 + (ry1 - ry0) * 0.52)),
+    # Pole (main shaft) with slight taper
+    pole_poly = [
+        (x_center - half_w - int(size * 0.01), pole_bot),
+        (x_center + half_w + int(size * 0.01), pole_bot),
+        (x_center + half_w, pole_top),
+        (x_center - half_w, pole_top),
     ]
+    d.polygon(pole_poly, fill=POLE)
 
-    # shadow + bolt
-    d.polygon([(x + 1, y + 1) for x, y in bolt], fill=(0, 0, 0, 90))
-    d.polygon(bolt, fill=ACCENT)
+    # Highlight edge
+    if size >= 32:
+        d.line([(x_center - half_w, pole_top), (x_center - half_w - 1, pole_bot)], fill=POLE_EDGE, width=max(1, size // 128))
 
-    if not small:
-        # "result bars" (like severity list)
-        bar_h = max(2, size // 44)
-        gap = max(2, size // 56)
-        bx0 = int(rx0)
-        by = int(ry0 + (ry1 - ry0) * 0.55)
-        widths = [0.90, 0.70, 0.82]
-        cols = [(255, 255, 255, 160), (255, 255, 255, 120), (ACCENT2[0], ACCENT2[1], ACCENT2[2], 150)]
-        for i in range(3):
-            bw = int((rx1 - rx0) * widths[i])
-            d.rounded_rectangle((bx0, by + i * (bar_h + gap), bx0 + bw, by + i * (bar_h + gap) + bar_h),
-                                radius=bar_h // 2,
-                                fill=cols[i])
+    # Crossarm
+    d.rounded_rectangle((arm_x0, arm_y - arm_h // 2, arm_x1, arm_y + arm_h // 2),
+                        radius=max(1, arm_h // 2),
+                        fill=POLE)
 
-    # Composite foreground with a tiny blur to reduce jaggies at small sizes
+    # Insulators (3)
+    if not tiny:
+        ins_r = max(2, size // 40)
+        xs = [arm_x0 + int(arm_len * 0.18), x_center, arm_x1 - int(arm_len * 0.18)]
+        for ix in xs:
+            # base
+            d.ellipse((ix - ins_r, arm_y - ins_r, ix + ins_r, arm_y + ins_r), fill=INSULATOR)
+            # top highlight
+            d.ellipse((ix - ins_r + 1, arm_y - ins_r + 1, ix + ins_r - 1, arm_y + ins_r - 1),
+                      outline=INSULATOR_HI, width=1)
+
+        # small “hardware” bolts
+        bolt_r = max(1, size // 110)
+        d.ellipse((x_center - bolt_r, arm_y + arm_h // 2 + 2 - bolt_r,
+                   x_center + bolt_r, arm_y + arm_h // 2 + 2 + bolt_r), fill=(255, 255, 255, 80))
+
+    # Simple transformer box (optional, only when large enough)
+    if size >= 64:
+        box_w = int(size * 0.14)
+        box_h = int(size * 0.12)
+        bx0 = x_center + half_w + int(size * 0.03)
+        by0 = int(size * 0.52)
+        d.rounded_rectangle((bx0, by0, bx0 + box_w, by0 + box_h),
+                            radius=max(2, size // 64),
+                            fill=(42, 46, 56, 255),
+                            outline=(255, 255, 255, 45),
+                            width=max(1, size // 160))
+        # strap
+        d.line([(bx0, by0 + box_h // 2), (bx0 + box_w, by0 + box_h // 2)], fill=(255, 255, 255, 35), width=max(1, size // 200))
+
+    # Slight soften at tiny sizes to reduce jaggies
     if size <= 32:
-        fg = fg.filter(ImageFilter.GaussianBlur(0.3))
-
-    img = Image.alpha_composite(img, fg)
-
-    # ----- Optional small "DCC" mark (only when it won't clutter) -----
-    if size >= 48:
-        mark = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        md = ImageDraw.Draw(mark)
-        font = load_font(size)
-        label = "DCC"
-        tw, th = text_size(md, label, font)
-        mx = int(size * 0.16)
-        my = int(size * 0.10)
-        # badge behind
-        bh = int(th * 1.20)
-        bw = int(tw * 1.25)
-        md.rounded_rectangle((mx - int(size * 0.02), my - int(size * 0.02), mx - int(size * 0.02) + bw, my - int(size * 0.02) + bh),
-                             radius=max(3, bh // 3),
-                             fill=(0, 0, 0, 60),
-                             outline=(255, 255, 255, 35),
-                             width=max(1, size // 128))
-        # text
-        md.text((mx, my), label, font=font, fill=(255, 255, 255, 220))
-        # tiny accent underline
-        ux0 = mx
-        uy = my + th + max(1, size // 96)
-        md.line([(ux0, uy), (ux0 + int(tw * 0.65), uy)], fill=(ACCENT[0], ACCENT[1], ACCENT[2], 220), width=max(1, size // 128))
-        mark = mark.filter(ImageFilter.GaussianBlur(max(0, size // 512)))
-        img = Image.alpha_composite(img, mark)
-
-    # sharpen for larger sizes
+        img = img.filter(ImageFilter.GaussianBlur(0.25))
+    # Sharpen for big sizes
     if size >= 64:
         img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=120, threshold=2))
 
@@ -287,15 +205,15 @@ def main():
     ico_path = os.path.join(out_dir, "app.ico")
     png_path = os.path.join(out_dir, "app_256.png")
 
-    images = [make_icon(s) for s in SIZES]
+    images = [draw_pole_icon(s) for s in SIZES]
 
     # preview
     images[-1].save(png_path, format="PNG")
 
-    # multi-size .ico
+    # multi-size ico
     images[0].save(ico_path, format="ICO", sizes=[(s, s) for s in SIZES])
 
-    print("Modern DCC icon generated successfully:")
+    print("Utility-pole icon generated:")
     print(" -", ico_path)
     print(" -", png_path)
 
