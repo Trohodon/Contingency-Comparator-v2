@@ -200,9 +200,13 @@ class CompareTab(ttk.Frame):
             tree = ttk.Treeview(
                 frame,
                 columns=("cont", "issue", "left", "right", "delta"),
-                show="headings",
+                show=("tree", "headings"),
             )
             self._trees[canonical] = tree
+            # Enable tree hierarchy (expand/collapse) so we can show
+            # "other contingencies" under the worst row per Resulting Issue.
+            tree.column("#0", width=24, stretch=False, anchor="w")
+            tree.heading("#0", text="")
 
             tree.heading("cont", text="Contingency")
             tree.heading("issue", text="Resulting issue")
@@ -463,10 +467,19 @@ class CompareTab(ttk.Frame):
         """
         Build comparison DF for one case type and push it into that tab's Treeview.
 
+        NEW (v2):
+          - We still compute the full (CTGLabel, LimViolID) outer-merge just like before.
+          - Then we GROUP rows by ResultingIssue (LimViolID):
+              * Parent row = the "worst" contingency for that issue
+                (prefers highest RightPct, falls back to LeftPct).
+              * Child rows = the remaining contingencies for that same issue.
+          - Treeview supports expand/collapse via show=("tree","headings").
+
         Threshold behavior:
-          - If BOTH Left% and Right% exist and are < threshold -> row is skipped.
-          - If only Left% exists: keep row only if Left% >= threshold.
-          - If only Right% exists: keep row only if Right% >= threshold.
+          - If a group's *worst* loading (max of Left/Right within the issue)
+            is < threshold, the whole group is hidden.
+          - Once a group is shown, children are shown even if they are below
+            the threshold (because they are the "other contingencies" people asked for).
 
         Δ% column:
           - If both sides present: numeric Right - Left (2 decimals).
@@ -493,13 +506,13 @@ class CompareTab(ttk.Frame):
         except Exception as e:
             msg = f"ERROR comparing {display_label}: {e}"
             self.log(msg)
-            tree.insert("", "end", values=(msg, "", "", "", ""))
+            tree.insert("", "end", text="", values=(msg, "", "", "", ""))
             return
 
         if df.empty:
             msg = f"No contingencies for {display_label} in either sheet."
             self.log(f"  {msg}")
-            tree.insert("", "end", values=(msg, "", "", "", ""))
+            tree.insert("", "end", text="", values=(msg, "", "", "", ""))
             return
 
         self.log(f"  {display_label}: raw rows={len(df)}")
@@ -507,70 +520,146 @@ class CompareTab(ttk.Frame):
         def is_nan(x) -> bool:
             return isinstance(x, float) and math.isnan(x)
 
-        kept_count = 0
+        def fmt_pct(x):
+            if is_nan(x):
+                return ""
+            try:
+                return f"{float(x):.2f}"
+            except Exception:
+                return str(x)
 
-        for _, row in df.iterrows():
-            cont = str(row.get("Contingency", "") or "")
-            issue = str(row.get("ResultingIssue", "") or "")
-
-            left_pct = row.get("LeftPct", math.nan)
-            right_pct = row.get("RightPct", math.nan)
-            delta_pct = row.get("DeltaPct", math.nan)
-
-            # Determine max present loading for threshold test
-            values = []
-            if not is_nan(left_pct):
-                values.append(left_pct)
-            if not is_nan(right_pct):
-                values.append(right_pct)
-
-            if not values:
-                # nothing on either side – skip
-                continue
-
-            max_val = max(values)
-            if max_val < threshold:
-                # below threshold on both sides -> hide
-                continue
-
-            # Decide what to display in delta column
+        def delta_text(left_pct, right_pct, delta_pct):
             if is_nan(left_pct) and not is_nan(right_pct):
-                delta_text = "Only in right"
-            elif not is_nan(left_pct) and is_nan(right_pct):
-                delta_text = "Only in left"
-            elif is_nan(left_pct) and is_nan(right_pct):
-                delta_text = ""
+                return "Only in right"
+            if not is_nan(left_pct) and is_nan(right_pct):
+                return "Only in left"
+            if is_nan(left_pct) and is_nan(right_pct):
+                return ""
+            try:
+                return f"{float(delta_pct):.2f}"
+            except Exception:
+                return str(delta_pct)
+
+        def row_max_lr(lp, rp):
+            vals = []
+            if not is_nan(lp):
+                vals.append(float(lp))
+            if not is_nan(rp):
+                vals.append(float(rp))
+            return max(vals) if vals else float("nan")
+
+        # ----------------------------
+        # Group rows by ResultingIssue
+        # ----------------------------
+        kept_groups = 0
+        kept_rows_total = 0
+
+        if "ResultingIssue" not in df.columns:
+            # Fallback: old behavior (should never happen)
+            for _, row in df.iterrows():
+                cont = str(row.get("Contingency", "") or "")
+                issue = str(row.get("ResultingIssue", "") or "")
+
+                left_pct = row.get("LeftPct", math.nan)
+                right_pct = row.get("RightPct", math.nan)
+                d_pct = row.get("DeltaPct", math.nan)
+
+                if row_max_lr(left_pct, right_pct) < threshold:
+                    continue
+
+                tree.insert(
+                    "",
+                    "end",
+                    text="",
+                    values=(cont, issue, fmt_pct(left_pct), fmt_pct(right_pct), delta_text(left_pct, right_pct, d_pct)),
+                )
+                kept_rows_total += 1
+
+            self.log(f"  {display_label}: shown rows={kept_rows_total}")
+            if kept_rows_total == 0:
+                tree.insert("", "end", text="", values=(f"No rows >= {threshold:.2f}%", "", "", "", ""))
+            return
+
+        # Build a stable parent ordering: sort groups by worst loading desc
+        groups = []
+        for issue, g in df.groupby("ResultingIssue", dropna=False):
+            # compute group's worst loading (for threshold + ordering)
+            g = g.copy()
+
+            g["_RowMax"] = g.apply(
+                lambda r: row_max_lr(r.get("LeftPct", math.nan), r.get("RightPct", math.nan)),
+                axis=1,
+            )
+            group_worst = g["_RowMax"].max() if len(g) else float("nan")
+            groups.append((issue, g, group_worst))
+
+        # Sort groups by group_worst desc, NaN last
+        groups.sort(key=lambda t: (-t[2] if not math.isnan(t[2]) else float("inf")))
+
+        for issue, g, group_worst in groups:
+            if math.isnan(group_worst) or group_worst < threshold:
+                continue  # hide entire group
+
+            # Pick the "parent" row:
+            # Prefer highest RightPct; if all NaN, use LeftPct.
+            if g["RightPct"].notna().any():
+                parent_idx = g["RightPct"].astype(float).idxmax()
+                sort_series = g["RightPct"].astype(float)
             else:
-                try:
-                    delta_text = f"{float(delta_pct):.2f}"
-                except Exception:
-                    delta_text = str(delta_pct)
+                parent_idx = g["LeftPct"].astype(float).idxmax()
+                sort_series = g["LeftPct"].astype(float)
 
-            def fmt_pct(x):
-                if is_nan(x):
-                    return ""
-                try:
-                    return f"{float(x):.2f}"
-                except Exception:
-                    return str(x)
+            parent_row = g.loc[parent_idx]
 
-            tree.insert(
+            # Children = all others, sorted high-to-low by same series used above
+            child_df = g.drop(index=[parent_idx]).copy()
+            # Ensure we don't crash on non-numeric values
+            try:
+                child_df["_Sort"] = child_df.apply(
+                    lambda r: float(r.get("RightPct")) if (g["RightPct"].notna().any() and not is_nan(r.get("RightPct", math.nan)))
+                    else (float(r.get("LeftPct")) if not is_nan(r.get("LeftPct", math.nan)) else float("-inf")),
+                    axis=1,
+                )
+                child_df = child_df.sort_values(by="_Sort", ascending=False).drop(columns=["_Sort"], errors="ignore")
+            except Exception:
+                pass
+
+            # Parent display values
+            p_cont = str(parent_row.get("Contingency", "") or "")
+            p_issue = str(parent_row.get("ResultingIssue", "") or "")
+
+            p_left = parent_row.get("LeftPct", math.nan)
+            p_right = parent_row.get("RightPct", math.nan)
+            p_delta = parent_row.get("DeltaPct", math.nan)
+
+            parent_iid = tree.insert(
                 "",
                 "end",
-                values=(
-                    cont,
-                    issue,
-                    fmt_pct(left_pct),
-                    fmt_pct(right_pct),
-                    delta_text,
-                ),
+                text="",
+                values=(p_cont, p_issue, fmt_pct(p_left), fmt_pct(p_right), delta_text(p_left, p_right, p_delta)),
+                open=False,  # start collapsed; user can expand
             )
-            kept_count += 1
+            kept_groups += 1
+            kept_rows_total += 1
 
-        self.log(f"  {display_label}: shown rows={kept_count}")
-        if kept_count == 0:
-            tree.insert(
-                "",
-                "end",
-                values=(f"No rows >= {threshold:.2f}%", "", "", "", ""),
-            )
+            # Child rows (other contingencies for same issue)
+            for _, crow in child_df.iterrows():
+                c_cont = str(crow.get("Contingency", "") or "")
+                # keep issue blank on children to visually "drop in" under parent
+                c_issue = ""
+
+                c_left = crow.get("LeftPct", math.nan)
+                c_right = crow.get("RightPct", math.nan)
+                c_delta = crow.get("DeltaPct", math.nan)
+
+                tree.insert(
+                    parent_iid,
+                    "end",
+                    text="",
+                    values=(c_cont, c_issue, fmt_pct(c_left), fmt_pct(c_right), delta_text(c_left, c_right, c_delta)),
+                )
+                kept_rows_total += 1
+
+        self.log(f"  {display_label}: shown groups={kept_groups}, total rows (parents+children)={kept_rows_total}")
+        if kept_groups == 0:
+            tree.insert("", "end", text="", values=(f"No rows >= {threshold:.2f}%", "", "", "", ""))
