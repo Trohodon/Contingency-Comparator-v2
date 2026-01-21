@@ -20,8 +20,13 @@ def post_process_csv(csv_path: str, dedup_enabled: bool, keep_categories, log_fu
     """
     Apply:
       1) Row filter (LimViolCat) using keep_categories
-      2) Optional LimViolID max filter (ONLY by LimViolID, keep highest LimViolPct)
+      2) If dedup_enabled:
+            v2 behavior: KEEP ALL rows but sort so max LimViolPct is first per LimViolID
+            (used later for Excel grouping/collapsing)
+         Else:
+            leave row order as-is
       3) Column blacklist
+
     Returns:
         path to filtered CSV (or None on failure)
     """
@@ -63,21 +68,21 @@ def post_process_csv(csv_path: str, dedup_enabled: bool, keep_categories, log_fu
         if log_func:
             log_func(f"Rows removed by row filter: {removed_rows}")
 
-        # 2) Optional dedup by LimViolID ONLY (keep highest LimViolPct)
+        # 2) v2 LimViolID behavior: keep all, sort max first per LimViolID (for Excel dropdown grouping)
         if dedup_enabled:
             if log_func:
                 log_func(
-                    "\nApplying LimViolID max filter "
-                    "(keep ONE row with highest LimViolPct per LimViolID)..."
+                    "\nExpandable issue view enabled:"
+                    "\n  - Keeping ALL contingencies per Resulting Issue (LimViolID)"
+                    "\n  - Sorting so the highest LimViolPct is first per LimViolID"
+                    "\n  - Excel workbook will collapse the non-max rows into a dropdown/outline"
                 )
-            filtered_data, removed_max = apply_limviolid_max_filter(
-                filtered_data, log_func
+            filtered_data, _ = apply_limviolid_max_filter(
+                filtered_data, log_func=log_func, keep_all=True
             )
-            if log_func:
-                log_func(f"Rows removed by LimViolID max filter: {removed_max}")
         else:
             if log_func:
-                log_func("\nLimViolID max filter is disabled; skipping.")
+                log_func("\nExpandable issue view disabled; leaving all rows unsorted by LimViolID.")
 
         # 3) Column blacklist
         if log_func:
@@ -123,6 +128,7 @@ def process_case(
       - Export ViolationCTG to CSV via SimAuto
       - Run post_process_csv on it
       - Optionally delete the original (unfiltered) CSV
+
     Returns:
       path to filtered CSV (or None on error)
     """
