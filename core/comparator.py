@@ -634,14 +634,6 @@ def _write_formatted_pair_sheet(
     ws = wb.create_sheet(title=ws_name)
     _apply_table_styles(ws)
 
-    # Enable Excel outline symbols for expand/collapse groups
-    try:
-        ws.sheet_view.showOutlineSymbols = True
-        ws.sheet_properties.outlinePr.summaryBelow = True
-    except Exception:
-        pass
-
-
     if df_pair.empty:
         ws.cell(row=2, column=2).value = "No rows above threshold."
         return
@@ -680,71 +672,10 @@ def _write_formatted_pair_sheet(
             cell.border = THIN_BORDER
         current_row += 1
 
-
-# Data rows (grouped by Resulting Issue with Excel outline)
-#
-# Parent row = worst contingency for a given Resulting Issue.
-# Child rows (other contingencies) are written underneath and hidden by default.
-if "ResultingIssue" in sub.columns and len(sub) > 0:
-    work = sub.copy()
-
-    # Safe numeric versions for ordering
-    work["_L"] = pd.to_numeric(work["LeftPct"], errors="coerce")
-    work["_R"] = pd.to_numeric(work["RightPct"], errors="coerce")
-    work["_RowMax"] = work[["_L", "_R"]].max(axis=1)
-
-    grouped = []
-    for issue_key, g in work.groupby("ResultingIssue", dropna=False):
-        g_worst = g["_RowMax"].max()
-        grouped.append((issue_key, g, g_worst))
-
-    # Sort groups by worst loading desc (NaNs last)
-    grouped.sort(key=lambda t: (-(t[2]) if pd.notna(t[2]) else float("inf")))
-
-    for issue_key, g, _g_worst in grouped:
-        # Pick parent row (prefer highest RightPct if any, else LeftPct)
-        if g["_R"].notna().any():
-            parent_idx = g["_R"].idxmax()
-            g_sorted = g.drop(index=[parent_idx]).sort_values(by="_R", ascending=False, na_position="last")
-        else:
-            parent_idx = g["_L"].idxmax()
-            g_sorted = g.drop(index=[parent_idx]).sort_values(by="_L", ascending=False, na_position="last")
-
-        parent = g.loc[parent_idx]
-
-        # ---- Parent row ----
-        p_cont = str(parent.get("Contingency", "") or "")
-        p_issue = str(parent.get("ResultingIssue", "") or "")
-        p_left = parent.get("LeftPct", None)
-        p_right = parent.get("RightPct", None)
-        p_delta = parent.get("DeltaDisplay", "")
-
-        values = [p_cont, p_issue, p_left, p_right, p_delta]
-        for col_offset, val in enumerate(values):
-            cell = ws.cell(row=current_row, column=2 + col_offset)
-            cell.value = val
-            cell.border = THIN_BORDER
-
-            if col_offset in (0, 1):  # text columns
-                cell.alignment = CELL_ALIGN_WRAP
-            else:
-                cell.alignment = Alignment(horizontal="right", vertical="top")
-
-            # number formatting for percentages
-            if col_offset in (2, 3) and isinstance(val, (float, int)):
-                cell.number_format = "0.00"
-
-        # Mark parent as collapsed if it has children
-        if len(g) > 1:
-            ws.row_dimensions[current_row].collapsed = True
-
-        current_row += 1
-
-        # ---- Child rows (hidden) ----
-        for _, row in g_sorted.iterrows():
+        # Data rows
+        for _, row in sub.iterrows():
             cont = str(row.get("Contingency", "") or "")
-            # leave issue blank for child rows (cleaner)
-            issue = ""
+            issue = str(row.get("ResultingIssue", "") or "")
             left_pct = row.get("LeftPct", None)
             right_pct = row.get("RightPct", None)
             delta = row.get("DeltaDisplay", "")
@@ -760,39 +691,12 @@ if "ResultingIssue" in sub.columns and len(sub) > 0:
                 else:
                     cell.alignment = Alignment(horizontal="right", vertical="top")
 
+                # number formatting for percentages
                 if col_offset in (2, 3) and isinstance(val, (float, int)):
                     cell.number_format = "0.00"
 
-            # Outline / hidden for Excel collapse
-            ws.row_dimensions[current_row].outlineLevel = 1
-            ws.row_dimensions[current_row].hidden = True
-
             current_row += 1
-else:
-    # Fallback: flat rows
-    for _, row in sub.iterrows():
-        cont = str(row.get("Contingency", "") or "")
-        issue = str(row.get("ResultingIssue", "") or "")
-        left_pct = row.get("LeftPct", None)
-        right_pct = row.get("RightPct", None)
-        delta = row.get("DeltaDisplay", "")
 
-        values = [cont, issue, left_pct, right_pct, delta]
-        for col_offset, val in enumerate(values):
-            cell = ws.cell(row=current_row, column=2 + col_offset)
-            cell.value = val
-            cell.border = THIN_BORDER
-
-            if col_offset in (0, 1):  # text columns
-                cell.alignment = CELL_ALIGN_WRAP
-            else:
-                cell.alignment = Alignment(horizontal="right", vertical="top")
-
-            # number formatting for percentages
-            if col_offset in (2, 3) and isinstance(val, (float, int)):
-                cell.number_format = "0.00"
-
-        current_row += 1
         # Blank row between blocks
         current_row += 1
 
