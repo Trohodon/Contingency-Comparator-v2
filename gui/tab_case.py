@@ -34,6 +34,9 @@ class CaseProcessingTab(ttk.Frame):
         self.bus_lv_var = tk.BooleanVar(value=False)
         self.delete_original_var = tk.BooleanVar(value=False)
 
+        # NEW: delete filtered CSVs AFTER combined workbook is created
+        self.delete_filtered_after_combined_var = tk.BooleanVar(value=False)
+
         self._is_running = False
 
         self._build_gui()
@@ -140,6 +143,13 @@ class CaseProcessingTab(ttk.Frame):
             variable=self.delete_original_var,
         ).grid(row=3, column=0, sticky="w", padx=5, pady=(4, 2))
 
+        # NEW checkbox
+        ttk.Checkbutton(
+            filters,
+            text="Delete filtered CSVs after combined workbook is created",
+            variable=self.delete_filtered_after_combined_var,
+        ).grid(row=4, column=0, sticky="w", padx=5, pady=(4, 2))
+
         log_frame = ttk.LabelFrame(self, text="Case Processing Log")
         log_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -167,6 +177,44 @@ class CaseProcessingTab(ttk.Frame):
         self.process_folder_btn.configure(state=state)
         self.update_idletasks()
         self.update()
+
+    def _delete_filtered_csvs_from_run(self, folder_to_case_csvs: dict):
+        """
+        Deletes ONLY the filtered CSVs that were produced in THIS run (the ones we have paths for),
+        and ONLY after the combined workbook has been created successfully.
+        """
+        deleted = []
+        errors = []
+
+        for _folder_name, case_map in (folder_to_case_csvs or {}).items():
+            for _label, csv_path in (case_map or {}).items():
+                if not csv_path:
+                    continue
+                if not os.path.isfile(csv_path):
+                    continue
+
+                base = os.path.basename(csv_path)
+                # conservative check: only delete filtered outputs
+                if not (base.endswith(".csv") and "_Filtered" in base):
+                    continue
+
+                try:
+                    os.remove(csv_path)
+                    deleted.append(csv_path)
+                except Exception as e:
+                    errors.append((csv_path, str(e)))
+
+        if deleted:
+            self.log("\nDeleted filtered CSVs after combined workbook creation:")
+            for p in deleted:
+                self.log(f"  - {p}")
+        else:
+            self.log("\nDelete filtered CSVs: none found to delete (from this run).")
+
+        if errors:
+            self.log("\nErrors deleting some filtered CSVs:")
+            for p, err in errors:
+                self.log(f"  ERROR deleting {p}: {err}")
 
     # ───────────── Single-case callbacks ───────────── #
 
@@ -329,9 +377,15 @@ class CaseProcessingTab(ttk.Frame):
                 errors.append(msg)
 
         if errors:
-            messagebox.showerror("Batch processing completed with errors", "Some cases failed. Check the log window for details.")
+            messagebox.showerror(
+                "Batch processing completed with errors",
+                "Some cases failed. Check the log window for details.",
+            )
         else:
-            messagebox.showinfo("Batch processing complete", "All detected ACCA/DC cases in the folder have been processed.")
+            messagebox.showinfo(
+                "Batch processing complete",
+                "All detected ACCA/DC cases in the folder have been processed.",
+            )
 
     # ---------- Multi-folder mode ---------- #
 
@@ -399,6 +453,11 @@ class CaseProcessingTab(ttk.Frame):
 
         if workbook_path:
             self.log(f"\nCombined workbook created at:\n  {workbook_path}")
+
+            # NEW: delete filtered csvs ONLY after workbook is successfully created
+            if self.delete_filtered_after_combined_var.get():
+                self._delete_filtered_csvs_from_run(folder_to_case_csvs)
+
             if errors:
                 messagebox.showerror(
                     "Multi-folder processing completed with errors",
