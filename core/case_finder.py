@@ -1,5 +1,3 @@
-# core/case_finder.py
-
 import os
 
 # Map human-friendly labels to filename substrings we look for
@@ -31,8 +29,8 @@ def scan_folder(folder: str, log_func=None):
         cases: list of dicts with keys:
             - filename
             - path
-            - type  (e.g. 'ACCA_LongTerm', 'ACCA_P1,2,4,7', 'DCwACver_P1-7', or 'Other')
-            - is_target (True if type != 'Other')
+            - type
+            - is_target
 
         target_cases: dict mapping type -> full path (first one found for each type)
     """
