@@ -1,15 +1,18 @@
+# core/comparison_builder.py
 import os
 import pandas as pd
 
 from .case_finder import TARGET_PATTERNS
 
-# Try to import openpyxl for formatting + outline grouping
+# Try to import openpyxl for nice formatting / grouping
 try:
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+
     OPENPYXL_AVAILABLE = True
-except ImportError:
+except Exception:
     OPENPYXL_AVAILABLE = False
+
 
 # Pretty display names for the three case types
 PRETTY_CASE_NAMES = {
@@ -17,6 +20,38 @@ PRETTY_CASE_NAMES = {
     "ACCA_P1,2,4,7": "ACCA",
     "DCwACver_P1-7": "DCwAC",
 }
+
+
+def _safe_filename_component(name: str) -> str:
+    """Make a Windows-safe filename chunk."""
+    if not name:
+        return "Output"
+    s = str(name).strip().replace(" ", "_")
+    illegal = '<>:"/\\|?*'
+    for ch in illegal:
+        s = s.replace(ch, "")
+    return s or "Output"
+
+
+def _compute_workbook_path(root_folder: str, include_branch_mva: bool, include_bus_lv: bool) -> str:
+    """
+    Naming rules (per v2 request):
+      - Branch MVA only -> {main folder name}_BranchMVA_CTG_Comparison.xlsx
+      - Bus Low Volts only -> {main folder name}_BusLowVolts_CTG_Comarison.xlsx  (note spelling per request)
+      - Both -> {main folder name}_CombinedCTG_Comparison.xlsx
+    """
+    root_name = _safe_filename_component(os.path.basename(os.path.normpath(root_folder)))
+
+    if include_branch_mva and include_bus_lv:
+        suffix = "CombinedCTG_Comparison"
+    elif include_branch_mva:
+        suffix = "BranchMVA_CTG_Comparison"
+    elif include_bus_lv:
+        suffix = "BusLowVolts_CTG_Comarison"
+    else:
+        suffix = "CTG_Comparison"
+
+    return os.path.join(root_folder, f"{root_name}_{suffix}.xlsx")
 
 
 def _to_float_series(series: pd.Series) -> pd.Series:
@@ -29,7 +64,13 @@ def _to_float_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
-def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
+def _build_simple_workbook(
+    root_folder: str,
+    folder_to_case_csvs: dict,
+    include_branch_mva: bool,
+    include_bus_lv: bool,
+    log_func=None,
+) -> str | None:
     """
     Fallback: simple one-sheet-per-scenario workbook, no fancy formatting,
     and no outline dropdown grouping.
@@ -39,7 +80,7 @@ def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
             log_func("No data to build combined workbook.")
         return None
 
-    workbook_path = os.path.join(root_folder, "Combined_ViolationCTG_Comparison.xlsx")
+    workbook_path = _compute_workbook_path(root_folder, include_branch_mva, include_bus_lv)
 
     if log_func:
         log_func(f"\nBuilding SIMPLE combined workbook:\n  {workbook_path}")
@@ -84,25 +125,41 @@ def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
     return workbook_path
 
 
-def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True, log_func=None):
+def build_workbook(
+    root_folder: str,
+    folder_to_case_csvs: dict,
+    group_details: bool = True,
+    include_branch_mva: bool = True,
+    include_bus_lv: bool = False,
+    log_func=None,
+) -> str | None:
     """
     Build a combined Excel workbook with one sheet per subfolder.
 
-    group_details=True:
-        - Within each CaseType block, group rows by LimViolID.
-        - Show the highest LimViolPct row per LimViolID.
-        - Collapse (hide) the other contingencies under an Excel outline dropdown.
-        - Sort the groups so the WORST (highest percent loading) issues appear first.
+    Parameters:
+      - root_folder: the selected "main" folder.
+      - folder_to_case_csvs: dict of {scenario_name: {case_label: filtered_csv_path}}
+      - group_details:
+            True  -> expandable issue view using Excel outline (+/-):
+                     show max row per LimViolID, hide the rest underneath.
+            False -> dump all rows as-is (no grouping).
+      - include_branch_mva / include_bus_lv:
+            Only used for output filename (filters are already applied upstream).
+
+    v2 behavior:
+      - Summary rows (main Resulting Issues) are ordered by highest Percent Loading (worst first).
+      - All output is shifted down by 1 row (blank Row 1).
     """
     if not folder_to_case_csvs:
         if log_func:
             log_func("No data to build combined workbook.")
         return None
 
+    # If openpyxl is not available, build a simple workbook without formatting
     if not OPENPYXL_AVAILABLE:
         if log_func:
             log_func("openpyxl not available; building simple combined workbook without special formatting.")
-        return _build_simple_workbook(root_folder, folder_to_case_csvs, log_func)
+        return _build_simple_workbook(root_folder, folder_to_case_csvs, include_branch_mva, include_bus_lv, log_func)
 
     # ---------------------------
     # Build scenario DataFrames
@@ -134,7 +191,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
     # ---------------------------
     # Create formatted workbook
     # ---------------------------
-    workbook_path = os.path.join(root_folder, "Combined_ViolationCTG_Comparison.xlsx")
+    workbook_path = _compute_workbook_path(root_folder, include_branch_mva, include_bus_lv)
 
     if log_func:
         log_func(f"\nBuilding FORMATTED combined workbook:\n  {workbook_path}")
@@ -181,7 +238,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
         ws.column_dimensions["D"].width = 18  # Contingency Value (MVA)
         ws.column_dimensions["E"].width = 18  # Percent Loading
 
-        # ✅ Shift everything down by 1 row
+        # Start on row 2 to leave a blank row 1
         current_row = 2
 
         for label in TARGET_PATTERNS:
@@ -226,14 +283,15 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
 
             has_limviolid = "LimViolID" in block_df.columns
 
+            # Grouping mode (expandable issue view)
             if group_details and has_limviolid:
-                # Numeric percent for sorting
+                # Create numeric percent column for ordering
                 if "LimViolPct" in block_df.columns:
                     block_df["_pct_num"] = _to_float_series(block_df["LimViolPct"])
                 else:
                     block_df["_pct_num"] = pd.Series([float("nan")] * len(block_df), index=block_df.index)
 
-                # Sort within each LimViolID so max is first
+                # Sort within each LimViolID so the max row comes first
                 sort_cols = ["LimViolID", "_pct_num"]
                 asc = [True, False]
                 if "CTGLabel" in block_df.columns:
@@ -241,10 +299,13 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                     asc.append(True)
 
                 block_df = block_df.sort_values(
-                    by=sort_cols, ascending=asc, na_position="last", kind="mergesort"
+                    by=sort_cols,
+                    ascending=asc,
+                    na_position="last",
+                    kind="mergesort",
                 )
 
-                # Order groups by their max % (worst first)
+                # NEW: order the groups themselves by their max % (worst first)
                 group_max = (
                     block_df.groupby("LimViolID", dropna=False)["_pct_num"]
                     .max()
@@ -261,6 +322,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
 
                 ordered_limviolid_values = list(group_max["LimViolID"])
 
+                # Write each group (summary row + collapsed details)
                 for limviolid in ordered_limviolid_values:
                     g = block_df[block_df["LimViolID"].eq(limviolid)].copy()
                     if g.empty:
@@ -270,7 +332,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                     if not rows:
                         continue
 
-                    # Summary row (max)
+                    # Summary row (max within group)
                     r0 = rows[0]
 
                     cB = ws.cell(row=current_row, column=2)
@@ -315,6 +377,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                         cB.border = thin_border
 
                         cC = ws.cell(row=current_row, column=3)
+                        # Blank so it's visually "under" the same Resulting Issue
                         cC.value = ""
                         cC.font = data_font
                         cC.alignment = left_align
@@ -335,6 +398,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                         detail_end = current_row
                         current_row += 1
 
+                    # Apply outline grouping (hide details by default)
                     if detail_start is not None and detail_end is not None:
                         ws.row_dimensions.group(
                             detail_start,
@@ -345,7 +409,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                         ws.row_dimensions[summary_row].collapsed = True
 
             else:
-                # No grouping: dump rows
+                # Non-grouped mode: just dump the rows
                 for _, row in block_df.iterrows():
                     c = ws.cell(row=current_row, column=2)
                     c.value = row.get("CTGLabel", "")
@@ -376,6 +440,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
             # One blank row between blocks
             current_row += 1
 
+    # Save workbook
     try:
         wb.save(workbook_path)
     except Exception as e:
