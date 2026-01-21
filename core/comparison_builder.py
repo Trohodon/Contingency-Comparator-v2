@@ -86,13 +86,13 @@ def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
 
 def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True, log_func=None):
     """
-    Build a combined Excel workbook with one sheet per subfolder, formatted
-    like the manual comparison sheet.
+    Build a combined Excel workbook with one sheet per subfolder.
 
     group_details=True:
         - Within each CaseType block, group rows by LimViolID.
         - Show the highest LimViolPct row per LimViolID.
         - Collapse (hide) the other contingencies under an Excel outline dropdown.
+        - IMPORTANT (v2): Sort the groups so the WORST (highest percent loading) issues appear first.
     """
     if not folder_to_case_csvs:
         if log_func:
@@ -139,6 +139,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
     if log_func:
         log_func(f"\nBuilding FORMATTED combined workbook:\n  {workbook_path}")
         log_func(f"Expandable dropdown grouping is {'ON' if group_details else 'OFF'}.")
+        log_func("Sorting Resulting Issues by highest Percent Loading (worst first).")
 
     wb = Workbook()
     default_sheet = wb.active
@@ -229,27 +230,50 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                 if "LimViolPct" in block_df.columns:
                     block_df["_pct_num"] = _to_float_series(block_df["LimViolPct"])
                 else:
-                    block_df["_pct_num"] = float("nan")
+                    block_df["_pct_num"] = pd.Series([float("nan")] * len(block_df), index=block_df.index)
 
-                # Sort so max first per LimViolID
+                # Sort WITHIN each LimViolID so max row comes first
                 sort_cols = ["LimViolID", "_pct_num"]
                 asc = [True, False]
                 if "CTGLabel" in block_df.columns:
                     sort_cols.append("CTGLabel")
                     asc.append(True)
 
-                block_df = block_df.sort_values(by=sort_cols, ascending=asc, na_position="last")
+                # Stable sort to keep things predictable
+                block_df = block_df.sort_values(
+                    by=sort_cols, ascending=asc, na_position="last", kind="mergesort"
+                )
 
-                # Group rows by LimViolID
-                for limviolid, g in block_df.groupby("LimViolID", sort=False):
-                    g = g.copy()
+                # NEW: order the groups themselves by the max % (worst first)
+                group_max = (
+                    block_df.groupby("LimViolID", dropna=False)["_pct_num"]
+                    .max()
+                    .reset_index()
+                    .rename(columns={"_pct_num": "_group_max_pct"})
+                )
 
-                    # First row is the "max" (because sorted desc)
+                # Worst first, NaNs last. Tie-break by LimViolID string for stability.
+                group_max["_lim_str"] = group_max["LimViolID"].astype(str)
+                group_max = group_max.sort_values(
+                    by=["_group_max_pct", "_lim_str"],
+                    ascending=[False, True],
+                    na_position="last",
+                    kind="mergesort",
+                )
+
+                ordered_limviolid_values = list(group_max["LimViolID"])
+
+                # Write groups in that order
+                for limviolid in ordered_limviolid_values:
+                    g = block_df[block_df["LimViolID"].eq(limviolid)].copy()
+                    if g.empty:
+                        continue
+
                     rows = list(g.itertuples(index=False))
                     if not rows:
                         continue
 
-                    # --- Write summary row (max) ---
+                    # --- Write summary row (max within group) ---
                     r0 = rows[0]
 
                     # B: CTGLabel
@@ -298,7 +322,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                         cB.alignment = left_align
                         cB.border = thin_border
 
-                        # C (blank to emphasize grouping under the same issue)
+                        # C (blank to emphasize grouping under same issue)
                         cC = ws.cell(row=current_row, column=3)
                         cC.value = ""
                         cC.font = data_font
@@ -330,12 +354,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                             outline_level=1,
                             hidden=True,
                         )
-                        # Mark the summary row as the "collapsed controller"
                         ws.row_dimensions[summary_row].collapsed = True
-
-                # Cleanup temp
-                if "_pct_num" in block_df.columns:
-                    pass
 
             else:
                 # No grouping: just dump rows
