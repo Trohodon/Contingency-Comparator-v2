@@ -92,7 +92,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
         - Within each CaseType block, group rows by LimViolID.
         - Show the highest LimViolPct row per LimViolID.
         - Collapse (hide) the other contingencies under an Excel outline dropdown.
-        - IMPORTANT (v2): Sort the groups so the WORST (highest percent loading) issues appear first.
+        - Sort the groups so the WORST (highest percent loading) issues appear first.
     """
     if not folder_to_case_csvs:
         if log_func:
@@ -140,6 +140,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
         log_func(f"\nBuilding FORMATTED combined workbook:\n  {workbook_path}")
         log_func(f"Expandable dropdown grouping is {'ON' if group_details else 'OFF'}.")
         log_func("Sorting Resulting Issues by highest Percent Loading (worst first).")
+        log_func("Shifting output down by 1 row (blank Row 1).")
 
     wb = Workbook()
     default_sheet = wb.active
@@ -180,7 +181,8 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
         ws.column_dimensions["D"].width = 18  # Contingency Value (MVA)
         ws.column_dimensions["E"].width = 18  # Percent Loading
 
-        current_row = 1
+        # ✅ Shift everything down by 1 row
+        current_row = 2
 
         for label in TARGET_PATTERNS:
             block_df = df[df["CaseType"] == label].copy()
@@ -224,35 +226,31 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
 
             has_limviolid = "LimViolID" in block_df.columns
 
-            # If grouping enabled and LimViolID exists, do outline collapse per LimViolID
             if group_details and has_limviolid:
-                # Build numeric percent for sorting
+                # Numeric percent for sorting
                 if "LimViolPct" in block_df.columns:
                     block_df["_pct_num"] = _to_float_series(block_df["LimViolPct"])
                 else:
                     block_df["_pct_num"] = pd.Series([float("nan")] * len(block_df), index=block_df.index)
 
-                # Sort WITHIN each LimViolID so max row comes first
+                # Sort within each LimViolID so max is first
                 sort_cols = ["LimViolID", "_pct_num"]
                 asc = [True, False]
                 if "CTGLabel" in block_df.columns:
                     sort_cols.append("CTGLabel")
                     asc.append(True)
 
-                # Stable sort to keep things predictable
                 block_df = block_df.sort_values(
                     by=sort_cols, ascending=asc, na_position="last", kind="mergesort"
                 )
 
-                # NEW: order the groups themselves by the max % (worst first)
+                # Order groups by their max % (worst first)
                 group_max = (
                     block_df.groupby("LimViolID", dropna=False)["_pct_num"]
                     .max()
                     .reset_index()
                     .rename(columns={"_pct_num": "_group_max_pct"})
                 )
-
-                # Worst first, NaNs last. Tie-break by LimViolID string for stability.
                 group_max["_lim_str"] = group_max["LimViolID"].astype(str)
                 group_max = group_max.sort_values(
                     by=["_group_max_pct", "_lim_str"],
@@ -263,7 +261,6 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
 
                 ordered_limviolid_values = list(group_max["LimViolID"])
 
-                # Write groups in that order
                 for limviolid in ordered_limviolid_values:
                     g = block_df[block_df["LimViolID"].eq(limviolid)].copy()
                     if g.empty:
@@ -273,31 +270,27 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                     if not rows:
                         continue
 
-                    # --- Write summary row (max within group) ---
+                    # Summary row (max)
                     r0 = rows[0]
 
-                    # B: CTGLabel
                     cB = ws.cell(row=current_row, column=2)
                     cB.value = getattr(r0, "CTGLabel", "")
                     cB.font = data_bold_font
                     cB.alignment = left_align
                     cB.border = thin_border
 
-                    # C: LimViolID (Resulting Issue)
                     cC = ws.cell(row=current_row, column=3)
                     cC.value = getattr(r0, "LimViolID", "")
                     cC.font = data_bold_font
                     cC.alignment = left_align
                     cC.border = thin_border
 
-                    # D: LimViolValue
                     cD = ws.cell(row=current_row, column=4)
                     cD.value = getattr(r0, "LimViolValue", "")
                     cD.font = data_bold_font
                     cD.alignment = center
                     cD.border = thin_border
 
-                    # E: LimViolPct
                     cE = ws.cell(row=current_row, column=5)
                     cE.value = getattr(r0, "LimViolPct", "")
                     cE.font = data_bold_font
@@ -307,7 +300,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                     summary_row = current_row
                     current_row += 1
 
-                    # --- Write detail rows (collapsed) ---
+                    # Detail rows (collapsed)
                     detail_start = None
                     detail_end = None
 
@@ -315,28 +308,24 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                         if detail_start is None:
                             detail_start = current_row
 
-                        # B
                         cB = ws.cell(row=current_row, column=2)
                         cB.value = getattr(r, "CTGLabel", "")
                         cB.font = data_font
                         cB.alignment = left_align
                         cB.border = thin_border
 
-                        # C (blank to emphasize grouping under same issue)
                         cC = ws.cell(row=current_row, column=3)
                         cC.value = ""
                         cC.font = data_font
                         cC.alignment = left_align
                         cC.border = thin_border
 
-                        # D
                         cD = ws.cell(row=current_row, column=4)
                         cD.value = getattr(r, "LimViolValue", "")
                         cD.font = data_font
                         cD.alignment = center
                         cD.border = thin_border
 
-                        # E
                         cE = ws.cell(row=current_row, column=5)
                         cE.value = getattr(r, "LimViolPct", "")
                         cE.font = data_font
@@ -346,7 +335,6 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                         detail_end = current_row
                         current_row += 1
 
-                    # Apply outline grouping (hide details by default)
                     if detail_start is not None and detail_end is not None:
                         ws.row_dimensions.group(
                             detail_start,
@@ -357,30 +345,26 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                         ws.row_dimensions[summary_row].collapsed = True
 
             else:
-                # No grouping: just dump rows
+                # No grouping: dump rows
                 for _, row in block_df.iterrows():
-                    # B: CTGLabel
                     c = ws.cell(row=current_row, column=2)
                     c.value = row.get("CTGLabel", "")
                     c.font = data_font
                     c.alignment = left_align
                     c.border = thin_border
 
-                    # C: Resulting Issue (LimViolID if present)
                     c = ws.cell(row=current_row, column=3)
                     c.value = row.get("LimViolID", "") if has_limviolid else ""
                     c.font = data_font
                     c.alignment = left_align
                     c.border = thin_border
 
-                    # D: Value
                     c = ws.cell(row=current_row, column=4)
                     c.value = row.get("LimViolValue", "")
                     c.font = data_font
                     c.alignment = center
                     c.border = thin_border
 
-                    # E: Percent
                     c = ws.cell(row=current_row, column=5)
                     c.value = row.get("LimViolPct", "")
                     c.font = data_font
@@ -392,7 +376,6 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
             # One blank row between blocks
             current_row += 1
 
-    # Save workbook
     try:
         wb.save(workbook_path)
     except Exception as e:
