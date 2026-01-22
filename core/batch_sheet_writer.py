@@ -36,12 +36,16 @@ def apply_table_styles(ws: Worksheet):
     for col_idx, width in widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    # IMPORTANT:
-    # summaryBelow=False makes Excel treat the TOP row as the summary row,
-    # so the +/- control appears at the top of each group (matches your "left" workbook).
+    # Make outline symbols visible + summary row above details
     try:
         ws.sheet_properties.outlinePr.summaryBelow = False
+        ws.sheet_properties.outlinePr.summaryRight = False
         ws.sheet_properties.outlinePr.applyStyles = True
+    except Exception:
+        pass
+
+    try:
+        ws.sheet_view.showOutlineSymbols = True
     except Exception:
         pass
 
@@ -147,7 +151,6 @@ def _write_data_row(
 
         # Bold summary/max row for readability
         if bold:
-            # Preserve existing font characteristics where relevant
             base = cell.font or Font()
             cell.font = Font(
                 name=base.name,
@@ -192,6 +195,7 @@ def write_formatted_pair_sheet(
       - keeps the top row visible + bolded, hides the rest (outlineLevel=1)
       - blanks ResultingIssue on hidden rows for readability
       - outline summary is ABOVE details (summaryBelow=False), so +/- appears at top
+      - marks the summary row as collapsed so Excel shows the + correctly
     """
     ws = wb.create_sheet(title=ws_name)
     apply_table_styles(ws)
@@ -249,7 +253,6 @@ def write_formatted_pair_sheet(
             axis=1,
         )
 
-        # Group order: by highest row in each issue group (descending)
         group_max = (
             sub.groupby("ResultingIssue")["_SortKey"]
             .max()
@@ -262,10 +265,11 @@ def write_formatted_pair_sheet(
             if g.empty:
                 continue
 
-            # Sort within issue by descending max pct
             g = g.sort_values(by="_SortKey", ascending=False, na_position="last")
 
+            summary_row_index = None
             first = True
+
             for _, r in g.iterrows():
                 cont = str(r.get("Contingency", "") or "")
                 issue = str(r.get("ResultingIssue", "") or "")
@@ -277,7 +281,9 @@ def write_formatted_pair_sheet(
                 right_pct = r.get("RightPct", None)
                 delta = str(r.get("DeltaDisplay", "") or "")
 
-                # Summary row visible + bold; detail rows hidden
+                if first:
+                    summary_row_index = current_row
+
                 _write_data_row(
                     ws,
                     current_row,
@@ -292,6 +298,13 @@ def write_formatted_pair_sheet(
                 )
                 current_row += 1
                 first = False
+
+            # Mark the summary row as collapsed when there are details
+            try:
+                if summary_row_index is not None and len(g) > 1:
+                    ws.row_dimensions[summary_row_index].collapsed = True
+            except Exception:
+                pass
 
         # Blank row between blocks
         current_row += 1
