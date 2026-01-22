@@ -2,6 +2,7 @@
 
 import os
 import math
+import threading
 from typing import Optional, List, Tuple
 
 import tkinter as tk
@@ -32,6 +33,10 @@ class CompareTab(ttk.Frame):
 
     NEW:
       - "Expandable issue view (+/-) in batch workbook": groups rows per Resulting Issue.
+
+    IMPORTANT (UI responsiveness):
+      - Batch workbook build runs in a background thread so the UI won't go "Not Responding".
+      - Logging is thread-safe and marshaled to the Tk UI thread when needed.
     """
 
     CASE_TYPE_TABS = [
@@ -68,14 +73,39 @@ class CompareTab(ttk.Frame):
 
         self._build_gui()
 
+    # ---------------- Thread-safe UI helpers ---------------- #
+
+    def _ui(self, func, *args, **kwargs):
+        """Run func on Tk UI thread."""
+        self.after(0, lambda: func(*args, **kwargs))
+
+    def _set_cursor_busy(self, busy: bool):
+        """Show a busy cursor while doing long work."""
+        try:
+            cursor = "watch" if busy else ""
+            self.winfo_toplevel().configure(cursor=cursor)
+        except Exception:
+            pass
+
     # ---------------- Logging helpers ---------------- #
 
-    def log(self, msg: str):
+    def _log_ui(self, msg: str):
         if self.local_log is not None:
             self.local_log.insert(tk.END, msg + "\n")
             self.local_log.see(tk.END)
         if self.external_log_func:
-            self.external_log_func(msg)
+            try:
+                self.external_log_func(msg)
+            except Exception:
+                # external log should never crash the UI
+                pass
+
+    def log(self, msg: str):
+        # If we're on a background thread, marshal to UI thread.
+        if threading.current_thread() is threading.main_thread():
+            self._log_ui(msg)
+        else:
+            self._ui(self._log_ui, msg)
 
     def _set_running(self, running: bool):
         self._is_running = running
@@ -87,8 +117,10 @@ class CompareTab(ttk.Frame):
         self.delete_btn.configure(state=state)
         self.clear_all_btn.configure(state=state)
 
+        self._set_cursor_busy(running)
+
+        # Let Tk paint immediately
         self.update_idletasks()
-        self.update()
 
     # ---------------- GUI layout ---------------- #
 
@@ -276,6 +308,10 @@ class CompareTab(ttk.Frame):
         self.log(f"Cleared queue ({count} item{'s' if count != 1 else ''}).")
 
     def build_queued_workbook(self):
+        if self._is_running:
+            messagebox.showinfo("Busy", "Another operation is running. Please wait.")
+            return
+
         if not self._queue:
             messagebox.showinfo("Empty queue", "No comparisons in the build queue.")
             return
@@ -305,23 +341,41 @@ class CompareTab(ttk.Frame):
         if not save_path:
             return
 
-        try:
-            self._set_running(True)
-            build_batch_comparison_workbook(
-                src_workbook=wb,
-                pairs=self._queue,
-                threshold=threshold,
-                output_path=save_path,
-                log_func=self.log,
-                expandable_issue_view=self.expandable_batch_var.get(),
-            )
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to build workbook:\n{e}")
-            self.log(f"ERROR building batch workbook: {e}")
-        finally:
-            self._set_running(False)
+        # Snapshot queue so changes during build don't affect the worker
+        pairs_snapshot = list(self._queue)
+        expandable = self.expandable_batch_var.get()
 
-        messagebox.showinfo("Batch workbook created", f"Batch comparison workbook created at:\n{save_path}")
+        self._set_running(True)
+        self.log("Building queued workbook...")
+
+        def worker():
+            ok = False
+            err_msg = None
+            try:
+                build_batch_comparison_workbook(
+                    src_workbook=wb,
+                    pairs=pairs_snapshot,
+                    threshold=threshold,
+                    output_path=save_path,
+                    log_func=self.log,  # thread-safe
+                    expandable_issue_view=expandable,
+                )
+                ok = True
+            except Exception as e:
+                err_msg = str(e)
+
+            def finish_on_ui():
+                self._set_running(False)
+                if ok:
+                    self.log(f"Batch comparison workbook created at:\n{save_path}")
+                    messagebox.showinfo("Batch workbook created", f"Batch comparison workbook created at:\n{save_path}")
+                else:
+                    messagebox.showerror("Error", f"Failed to build workbook:\n{err_msg}")
+                    self.log(f"ERROR building batch workbook: {err_msg}")
+
+            self._ui(finish_on_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------------- Main compare callbacks ---------------- #
 
@@ -396,8 +450,6 @@ class CompareTab(ttk.Frame):
         try:
             for label, canonical in self.CASE_TYPE_TABS:
                 self.update_idletasks()
-                self.update()
-
                 self._compare_one_case_type(
                     wb,
                     left_sheet,
