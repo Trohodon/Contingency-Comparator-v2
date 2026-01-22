@@ -10,7 +10,6 @@ from tkinter import ttk, filedialog, messagebox
 from core.comparator import (
     list_sheets,
     build_case_type_comparison,   # still used for live view
-    CASE_TYPES_CANONICAL,
     build_batch_comparison_workbook,
 )
 
@@ -30,6 +29,9 @@ class CompareTab(ttk.Frame):
          * "Delete selected": remove pair from queue
          * "Clear all": remove all queued pairs
          * "Build queued workbook": write a new .xlsx containing one sheet per pair
+
+    NEW:
+      - "Expandable issue view (+/-) in batch workbook": groups rows per Resulting Issue.
     """
 
     CASE_TYPE_TABS = [
@@ -47,6 +49,9 @@ class CompareTab(ttk.Frame):
 
         # Percent loading threshold
         self.threshold_var = tk.StringVar(value="80")
+
+        # NEW: expandable issue view for batch build workbook
+        self.expandable_batch_var = tk.BooleanVar(value=True)
 
         self._sheets: List[str] = []
         self._is_running = False
@@ -80,8 +85,6 @@ class CompareTab(ttk.Frame):
         self.add_btn.configure(state=state)
         self.build_btn.configure(state=state)
         self.delete_btn.configure(state=state)
-
-        # NEW: clear-all button also follows running state
         self.clear_all_btn.configure(state=state)
 
         self.update_idletasks()
@@ -107,9 +110,16 @@ class CompareTab(ttk.Frame):
         ttk.Label(wb_frame, text="Percent loading threshold:").grid(
             row=0, column=3, sticky="e", padx=(10, 2)
         )
-        ttk.Entry(
-            wb_frame, textvariable=self.threshold_var, width=6
-        ).grid(row=0, column=4, sticky="w")
+        ttk.Entry(wb_frame, textvariable=self.threshold_var, width=6).grid(
+            row=0, column=4, sticky="w"
+        )
+
+        # NEW checkbox
+        ttk.Checkbutton(
+            wb_frame,
+            text="Expandable issue view (+/-) in batch workbook",
+            variable=self.expandable_batch_var,
+        ).grid(row=1, column=2, sticky="w", pady=(6, 0))
 
         wb_frame.columnconfigure(2, weight=1)
 
@@ -117,7 +127,6 @@ class CompareTab(ttk.Frame):
         cmp_frame = ttk.LabelFrame(self, text="Comparison")
         cmp_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 8))
 
-        # Row 0: sheet selection + add/compare buttons
         ttk.Label(cmp_frame, text="Left sheet:").grid(
             row=0, column=0, sticky="w", padx=5, pady=2
         )
@@ -134,21 +143,15 @@ class CompareTab(ttk.Frame):
         )
         self.right_combo.grid(row=0, column=3, sticky="w", padx=5, pady=2)
 
-        # Add to queue (to the left of Compare)
-        self.add_btn = ttk.Button(
-            cmp_frame, text="Add to queue", command=self.add_to_queue
-        )
+        self.add_btn = ttk.Button(cmp_frame, text="Add to queue", command=self.add_to_queue)
         self.add_btn.grid(row=0, column=4, sticky="w", padx=(10, 5), pady=2)
 
-        self.compare_btn = ttk.Button(
-            cmp_frame, text="Compare", command=self.run_comparison
-        )
+        self.compare_btn = ttk.Button(cmp_frame, text="Compare", command=self.run_comparison)
         self.compare_btn.grid(row=0, column=5, sticky="w", padx=(5, 5), pady=2)
 
         cmp_frame.columnconfigure(1, weight=1)
         cmp_frame.columnconfigure(3, weight=1)
 
-        # Row 1: queue list + delete/build buttons
         ttk.Label(cmp_frame, text="Queued comparisons:").grid(
             row=1, column=0, sticky="nw", padx=5, pady=(4, 4)
         )
@@ -159,29 +162,20 @@ class CompareTab(ttk.Frame):
         self._queue_listbox = tk.Listbox(queue_frame, height=4)
         self._queue_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        q_scroll = ttk.Scrollbar(
-            queue_frame, orient="vertical", command=self._queue_listbox.yview
-        )
+        q_scroll = ttk.Scrollbar(queue_frame, orient="vertical", command=self._queue_listbox.yview)
         self._queue_listbox.configure(yscrollcommand=q_scroll.set)
         q_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Buttons on the right of queue list
         self.delete_btn = ttk.Button(
             cmp_frame, text="Delete selected", command=self.delete_selected_queue_item
         )
         self.delete_btn.grid(row=1, column=4, sticky="nw", padx=(10, 5), pady=(4, 4))
 
-        # NEW: Clear all button (clears entire queue)
-        self.clear_all_btn = ttk.Button(
-            cmp_frame, text="Clear all", command=self.clear_all_queue
-        )
+        self.clear_all_btn = ttk.Button(cmp_frame, text="Clear all", command=self.clear_all_queue)
         self.clear_all_btn.grid(row=1, column=5, sticky="nw", padx=(5, 5), pady=(4, 4))
 
-        # Build button moved to row 2 to make room
         self.build_btn = ttk.Button(
-            cmp_frame,
-            text="Build queued workbook",
-            command=self.build_queued_workbook,
+            cmp_frame, text="Build queued workbook", command=self.build_queued_workbook
         )
         self.build_btn.grid(row=2, column=5, sticky="nw", padx=(5, 5), pady=(4, 6))
 
@@ -189,7 +183,7 @@ class CompareTab(ttk.Frame):
         cmp_frame.columnconfigure(1, weight=1)
         cmp_frame.columnconfigure(3, weight=1)
 
-        # Notebook for ACCA LongTerm / ACCA / DCwAC (live view)
+        # Notebook for live view
         nb = ttk.Notebook(self)
         nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
 
@@ -222,16 +216,13 @@ class CompareTab(ttk.Frame):
             tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             vs.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Log area at bottom
         log_frame = ttk.LabelFrame(self, text="Compare Log")
         log_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=False, padx=10, pady=(0, 10))
 
         self.local_log = tk.Text(log_frame, wrap="word", height=7)
         self.local_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        log_scroll = ttk.Scrollbar(
-            log_frame, orient="vertical", command=self.local_log.yview
-        )
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.local_log.yview)
         self.local_log.configure(yscrollcommand=log_scroll.set)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -240,17 +231,13 @@ class CompareTab(ttk.Frame):
     def add_to_queue(self):
         wb = self.workbook_path.get()
         if not wb.lower().endswith(".xlsx") or not os.path.isfile(wb):
-            messagebox.showwarning(
-                "No workbook", "Please load a valid .xlsx workbook first."
-            )
+            messagebox.showwarning("No workbook", "Please load a valid .xlsx workbook first.")
             return
 
         left_sheet = self.left_sheet_var.get()
         right_sheet = self.right_sheet_var.get()
         if not left_sheet or not right_sheet:
-            messagebox.showwarning(
-                "No sheets selected", "Please select both left and right sheets."
-            )
+            messagebox.showwarning("No sheets selected", "Please select both left and right sheets.")
             return
 
         pair = (left_sheet, right_sheet)
@@ -258,7 +245,6 @@ class CompareTab(ttk.Frame):
 
         display = f"{left_sheet}  vs  {right_sheet}"
         self._queue_listbox.insert(tk.END, display)
-
         self.log(f"Added to queue: {display}")
 
     def delete_selected_queue_item(self):
@@ -267,7 +253,6 @@ class CompareTab(ttk.Frame):
         sel = list(self._queue_listbox.curselection())
         if not sel:
             return
-        # delete from end to start so indices stay valid
         for idx in reversed(sel):
             self._queue_listbox.delete(idx)
             if 0 <= idx < len(self._queue):
@@ -275,14 +260,10 @@ class CompareTab(ttk.Frame):
                 self.log(f"Removed from queue: {removed[0]} vs {removed[1]}")
 
     def clear_all_queue(self):
-        """
-        Clear the entire comparison queue (and the listbox).
-        """
         if not self._queue:
             self.log("Queue is already empty.")
             return
 
-        # Optional confirmation - remove these 3 lines if you don't want a popup.
         if not messagebox.askyesno("Clear queue", "Clear ALL queued comparisons?"):
             return
 
@@ -301,25 +282,18 @@ class CompareTab(ttk.Frame):
 
         wb = self.workbook_path.get()
         if not wb.lower().endswith(".xlsx") or not os.path.isfile(wb):
-            messagebox.showwarning(
-                "No workbook", "Please load a valid .xlsx workbook first."
-            )
+            messagebox.showwarning("No workbook", "Please load a valid .xlsx workbook first.")
             return
 
-        # Threshold
         try:
             thr_raw = self.threshold_var.get().strip()
             threshold = float(thr_raw) if thr_raw else 0.0
             if threshold < 0:
                 threshold = 0.0
         except ValueError:
-            messagebox.showwarning(
-                "Invalid threshold",
-                "Percent loading threshold must be a number (e.g. 80).",
-            )
+            messagebox.showwarning("Invalid threshold", "Percent loading threshold must be a number (e.g. 80).")
             return
 
-        # Default save folder = folder of source workbook
         initial_dir = os.path.dirname(wb) if os.path.dirname(wb) else "."
         save_path = filedialog.asksaveasfilename(
             title="Save batch comparison workbook",
@@ -339,6 +313,7 @@ class CompareTab(ttk.Frame):
                 threshold=threshold,
                 output_path=save_path,
                 log_func=self.log,
+                expandable_issue_view=self.expandable_batch_var.get(),
             )
         except Exception as e:
             messagebox.showerror("Error", f"Failed to build workbook:\n{e}")
@@ -346,10 +321,7 @@ class CompareTab(ttk.Frame):
         finally:
             self._set_running(False)
 
-        messagebox.showinfo(
-            "Batch workbook created",
-            f"Batch comparison workbook created at:\n{save_path}",
-        )
+        messagebox.showinfo("Batch workbook created", f"Batch comparison workbook created at:\n{save_path}")
 
     # ---------------- Main compare callbacks ---------------- #
 
@@ -368,7 +340,6 @@ class CompareTab(ttk.Frame):
         self.workbook_path.set(path)
         self.log(f"Loaded workbook: {path}")
 
-        # Get sheet names
         try:
             self._sheets = list_sheets(path)
         except Exception as e:
@@ -383,7 +354,6 @@ class CompareTab(ttk.Frame):
         self.left_combo["values"] = self._sheets
         self.right_combo["values"] = self._sheets
 
-        # Default selection: first as left, second as right (if exists)
         self.left_sheet_var.set(self._sheets[0])
         if len(self._sheets) > 1:
             self.right_sheet_var.set(self._sheets[1])
@@ -392,37 +362,27 @@ class CompareTab(ttk.Frame):
 
     def run_comparison(self):
         if self._is_running:
-            messagebox.showinfo(
-                "Busy", "A comparison is already running. Please wait."
-            )
+            messagebox.showinfo("Busy", "A comparison is already running. Please wait.")
             return
 
         wb = self.workbook_path.get()
         if not wb.lower().endswith(".xlsx") or not os.path.isfile(wb):
-            messagebox.showwarning(
-                "No workbook", "Please load a valid .xlsx workbook first."
-            )
+            messagebox.showwarning("No workbook", "Please load a valid .xlsx workbook first.")
             return
 
         left_sheet = self.left_sheet_var.get()
         right_sheet = self.right_sheet_var.get()
         if not left_sheet or not right_sheet:
-            messagebox.showwarning(
-                "No sheets selected", "Please select both left and right sheets."
-            )
+            messagebox.showwarning("No sheets selected", "Please select both left and right sheets.")
             return
 
-        # Parse percent threshold
         try:
             thr_raw = self.threshold_var.get().strip()
             threshold = float(thr_raw) if thr_raw else 0.0
             if threshold < 0:
                 threshold = 0.0
         except ValueError:
-            messagebox.showwarning(
-                "Invalid threshold",
-                "Percent loading threshold must be a number (e.g. 80).",
-            )
+            messagebox.showwarning("Invalid threshold", "Percent loading threshold must be a number (e.g. 80).")
             return
 
         self.log(
@@ -460,28 +420,13 @@ class CompareTab(ttk.Frame):
         display_label: str,
         threshold: float,
     ):
-        """
-        Build comparison DF for one case type and push it into that tab's Treeview.
-
-        Threshold behavior:
-          - If BOTH Left% and Right% exist and are < threshold -> row is skipped.
-          - If only Left% exists: keep row only if Left% >= threshold.
-          - If only Right% exists: keep row only if Right% >= threshold.
-
-        Δ% column:
-          - If both sides present: numeric Right - Left (2 decimals).
-          - Only left present: 'Only in left'
-          - Only right present: 'Only in right'
-        """
         tree = self._trees.get(case_type_canonical)
         if tree is None:
             return
 
-        # Clear any existing rows
         tree.delete(*tree.get_children())
 
         try:
-            # max_rows=None -> show all; sorting is handled inside comparator
             df = build_case_type_comparison(
                 workbook_path,
                 base_sheet=left_sheet,
@@ -517,7 +462,6 @@ class CompareTab(ttk.Frame):
             right_pct = row.get("RightPct", math.nan)
             delta_pct = row.get("DeltaPct", math.nan)
 
-            # Determine max present loading for threshold test
             values = []
             if not is_nan(left_pct):
                 values.append(left_pct)
@@ -525,15 +469,11 @@ class CompareTab(ttk.Frame):
                 values.append(right_pct)
 
             if not values:
-                # nothing on either side – skip
                 continue
 
-            max_val = max(values)
-            if max_val < threshold:
-                # below threshold on both sides -> hide
+            if max(values) < threshold:
                 continue
 
-            # Decide what to display in delta column
             if is_nan(left_pct) and not is_nan(right_pct):
                 delta_text = "Only in right"
             elif not is_nan(left_pct) and is_nan(right_pct):
@@ -557,20 +497,10 @@ class CompareTab(ttk.Frame):
             tree.insert(
                 "",
                 "end",
-                values=(
-                    cont,
-                    issue,
-                    fmt_pct(left_pct),
-                    fmt_pct(right_pct),
-                    delta_text,
-                ),
+                values=(cont, issue, fmt_pct(left_pct), fmt_pct(right_pct), delta_text),
             )
             kept_count += 1
 
         self.log(f"  {display_label}: shown rows={kept_count}")
         if kept_count == 0:
-            tree.insert(
-                "",
-                "end",
-                values=(f"No rows >= {threshold:.2f}%", "", "", "", ""),
-            )
+            tree.insert("", "end", values=(f"No rows >= {threshold:.2f}%", "", "", "", ""))
