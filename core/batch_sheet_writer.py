@@ -78,11 +78,29 @@ def _max_pct(left: Optional[float], right: Optional[float]) -> float:
 def _normalize_issue_series(series: pd.Series) -> pd.Series:
     """
     Forward-fill blanks so that blank ResultingIssue inherits the issue above.
-    (Safety net: the parser also does this, but batch sheets should be robust.)
+
+    IMPORTANT:
+    We intentionally avoid pandas Series.replace(...) here because some pandas
+    versions can throw:
+      "'regex' must be a string ... you passed a 'bool'"
+    depending on dtype / None handling.
+
+    This implementation is dtype-safe.
     """
     s = series.copy()
-    s = s.replace("", pd.NA)
-    s = s.replace(None, pd.NA)
+
+    def is_blank(v) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, float) and math.isnan(v):
+            return True
+        if isinstance(v, str) and v.strip() == "":
+            return True
+        return False
+
+    # Mask blanks to NA, then ffill
+    mask = s.apply(is_blank)
+    s = s.mask(mask)
     s = s.ffill()
     return s.fillna("")
 
@@ -178,7 +196,9 @@ def write_formatted_pair_sheet(
             continue
 
         # Normalize blank issues -> same as above (safety net)
-        sub["ResultingIssue"] = _normalize_issue_series(sub.get("ResultingIssue", pd.Series([], dtype=str)))
+        if "ResultingIssue" not in sub.columns:
+            sub["ResultingIssue"] = ""
+        sub["ResultingIssue"] = _normalize_issue_series(sub["ResultingIssue"])
 
         # Title + header rows
         _write_title_row(ws, current_row, case_type_pretty)
@@ -262,6 +282,3 @@ def write_formatted_pair_sheet(
 
         # Blank row between blocks
         current_row += 1
-
-    # Cleanup temp column if it exists
-    # (No action needed in worksheet; it's only in df)
