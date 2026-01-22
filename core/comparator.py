@@ -15,25 +15,21 @@
 
 from __future__ import annotations
 
-import os
-import re
 import math
-from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import pandas as pd
 
-from openpyxl import load_workbook, Workbook
-from openpyxl.worksheet.worksheet import Worksheet
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.worksheet import Worksheet
 
 
 # ---------------------------------------------------------------------------
-# Canonical case type handling
+# Case type labels (pretty)
 # ---------------------------------------------------------------------------
 
-# Reverse mapping so we can label rows nicely when exporting
 CANONICAL_TO_PRETTY = {
     "ACCA_LongTerm": "ACCA LongTerm",
     "ACCA_P1,2,4,7": "ACCA",
@@ -62,34 +58,28 @@ def _sanitize_sheet_name(name: str) -> str:
     cleaned = cleaned.strip()
     if not cleaned:
         cleaned = "Sheet"
-
-    # Excel limit
     return cleaned[:31]
 
 
-# ===== Formatting helpers for batch workbook =================================
+# ---------------------------------------------------------------------------
+# Formatting helpers for batch workbook
+# ---------------------------------------------------------------------------
 
 def _apply_table_styles(ws: Worksheet):
-    """
-    Set reasonable column widths for a formatted comparison sheet.
-    """
     widths = {
         2: 45,  # B: Contingency Events
         3: 45,  # C: Resulting Issue
         4: 15,  # D: Left %
         5: 15,  # E: Right %
-        6: 22,  # F: Delta
+        6: 22,  # F: Delta/Status
     }
     for col_idx, width in widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    # No freeze panes: scroll normally
-    # ws.freeze_panes = "B4"
 
-
-# Styles (approximate the blue style from the first tab)
-HEADER_FILL = PatternFill("solid", fgColor="305496")  # dark blue
+HEADER_FILL = PatternFill("solid", fgColor="305496")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
+
 TITLE_FILL = HEADER_FILL
 TITLE_FONT = Font(color="FFFFFF", bold=True, size=12)
 
@@ -119,10 +109,11 @@ def _max_pct(left: Optional[float], right: Optional[float]) -> float:
 
 def _normalize_issue_series(series: pd.Series) -> pd.Series:
     """
-    Forward-fill blanks so that blank ResultingIssue inherits the issue above.
+    Forward-fill blanks so blank ResultingIssue inherits the issue above.
 
-    Avoid pandas Series.replace(...) due to pandas version quirks that can throw:
-      "'regex' must be a string ... you passed a 'bool'"
+    IMPORTANT: we avoid Series.replace(..., regex=...) because some pandas builds
+    can throw "'regex' must be a string ... you passed a 'bool'" depending on
+    parameter order / version.
     """
     s = series.copy()
 
@@ -215,7 +206,7 @@ def _write_data_row(
 
 
 # ---------------------------------------------------------------------------
-# Case-type comparison builder (single pair)
+# Single pair extraction and merge
 # ---------------------------------------------------------------------------
 
 def build_case_type_comparison(
@@ -268,8 +259,6 @@ def _extract_sheet_as_df(
         C: Resulting Issue
         D: Contingency Value (MVA)
         E: Percent Loading
-
-    We only keep rows where Percent Loading >= threshold.
     """
     rows = []
     current_case_type = ""
@@ -281,19 +270,23 @@ def _extract_sheet_as_df(
         d = ws.cell(row=r, column=4).value
         e = ws.cell(row=r, column=5).value
 
+        # Title rows
         if isinstance(b, str) and b.strip() in ("ACCA LongTerm", "ACCA", "DCwAC"):
             current_case_type = b.strip()
             continue
 
+        # Header rows
         if current_case_type and isinstance(b, str) and b.strip() == "Contingency Events":
             continue
 
         if not current_case_type:
             continue
 
+        # Skip fully blank lines
         if b is None and c is None and d is None and e is None:
             continue
 
+        # Parse pct
         try:
             pct = float(e) if e is not None else None
         except Exception:
@@ -301,7 +294,6 @@ def _extract_sheet_as_df(
 
         if pct is None:
             continue
-
         if pct < threshold:
             continue
 
@@ -328,10 +320,6 @@ def _extract_sheet_as_df(
 
     return df
 
-
-# ---------------------------------------------------------------------------
-# Pair DF merge logic (left/right)
-# ---------------------------------------------------------------------------
 
 def build_pair_comparison_df(
     df_left: pd.DataFrame,
@@ -387,12 +375,11 @@ def build_pair_comparison_df(
 
     merged["DeltaDisplay"] = merged.apply(make_delta, axis=1)
 
-    def row_sort_key(r):
-        return _max_pct(r.get("LeftPct", None), r.get("RightPct", None))
-
-    merged["_SortKey"] = merged.apply(row_sort_key, axis=1)
+    merged["_SortKey"] = merged.apply(
+        lambda r: _max_pct(r.get("LeftPct", None), r.get("RightPct", None)),
+        axis=1,
+    )
     merged = merged.sort_values(by=["CaseType", "_SortKey"], ascending=[True, False])
-
     merged = merged.drop(columns=["_SortKey"])
 
     for col in ["LeftPct", "RightPct", "LeftMVA", "RightMVA"]:
@@ -403,7 +390,7 @@ def build_pair_comparison_df(
 
 
 # ---------------------------------------------------------------------------
-# Scenario compare sheet (one sheet inside same workbook)
+# Scenario compare sheet (optional utility)
 # ---------------------------------------------------------------------------
 
 def compare_scenarios(
@@ -450,39 +437,23 @@ def compare_scenarios(
             else:
                 try:
                     d = float(rp) - float(lp)
-                    if abs(d) < 1e-9:
-                        status_col.append("Unchanged")
-                    else:
-                        status_col.append("Changed")
+                    status_col.append("Unchanged" if abs(d) < 1e-9 else "Changed")
                 except Exception:
                     status_col.append("Changed")
 
         merged["Status"] = status_col
 
         def keep_row(r) -> bool:
-            base_pct = r["LeftPct"]
-            new_pct = r["RightPct"]
             status = r["Status"]
-
             if status in ("Only in new", "Only in base"):
                 return True
-
-            if pd.isna(base_pct) or pd.isna(new_pct):
-                return True
-
-            delta = new_pct - base_pct
-
             if mode == "only_changed":
-                return abs(delta) > 1e-9
+                return status == "Changed"
             return True
 
         merged = merged[merged.apply(keep_row, axis=1)].copy()
 
-        # Nicer sheet name (spaces, no _vs_)
-        base_short = _sanitize_sheet_name(base_sheet).replace(" ", "")
-        new_short = _sanitize_sheet_name(new_sheet).replace(" ", "")
-        comp_name = f"Compare {base_short} vs {new_short}"
-        comp_name = _sanitize_sheet_name(comp_name)
+        comp_name = _sanitize_sheet_name(f"{base_sheet} vs {new_sheet}".replace("_vs_", " vs "))
 
         if comp_name in wb.sheetnames:
             wb.remove(wb[comp_name])
@@ -519,25 +490,31 @@ def compare_scenarios(
 # ---------------------------------------------------------------------------
 
 def build_batch_comparison_workbook(
-    src_workbook_path: str,
-    pairs: List[Tuple[str, str]],
-    output_path: str,
-    threshold: float,
-    expandable_issue_view: bool,
+    src_workbook_path: Optional[str] = None,
+    pairs: Optional[List[Tuple[str, str]]] = None,
+    output_path: str = "",
+    threshold: float = 0.0,
+    expandable_issue_view: bool = True,
     log_func: Optional[Callable[[str], None]] = None,
+    # Backwards-compatible alias used by your GUI:
+    src_workbook: Optional[str] = None,
 ):
     """
-    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair,
-    Each sheet is grouped into ACCA LongTerm / ACCA / DCwAC blocks, with columns:
-      Contingency Events | Resulting Issue | Left % | Right % | Δ% / Status
+    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair.
 
-    If expandable_issue_view=True:
-      - group by ResultingIssue
-      - sort each issue group's rows by max(LeftPct, RightPct) desc
-      - top row (max) is visible & bold; remaining rows hidden with outlineLevel=1
-      - Resulting Issue is blank for hidden rows
-      - summary is ABOVE detail rows (so +/- appears at TOP like the comparison builder output)
+    Accepts BOTH src_workbook_path and src_workbook for backwards compatibility.
+    Your GUI currently passes src_workbook=..., so we support that too.
     """
+    # Compatibility bridge
+    if src_workbook_path is None:
+        src_workbook_path = src_workbook
+
+    if not src_workbook_path:
+        raise ValueError("src_workbook_path (or src_workbook) is required.")
+
+    if pairs is None:
+        pairs = []
+
     if log_func:
         log_func(f"Building batch workbook: {output_path}")
         log_func(f"  Source workbook: {src_workbook_path}")
@@ -547,7 +524,7 @@ def build_batch_comparison_workbook(
 
     wb = Workbook()
 
-    # Remove the default sheet; we'll create our own
+    # Remove default sheet
     default_sheet = wb.active
     wb.remove(default_sheet)
 
@@ -591,8 +568,7 @@ def build_batch_comparison_workbook(
                 ]
             )
 
-        # Sheet name: keep it clean and readable (no numbering)
-        # Example: "Base Case vs Breaker Test 1"
+        # Sheet name: NO numbering, and use " vs " (spaces) for visuals
         base_name = f"{left_sheet} vs {right_sheet}"
         base_name = _sanitize_sheet_name(base_name)
 
@@ -623,10 +599,9 @@ def _write_formatted_pair_sheet(
     expandable_issue_view: bool,
 ):
     ws = wb.create_sheet(title=ws_name)
-
     _apply_table_styles(ws)
 
-    # Outline behavior: summary ABOVE details => +/- appears at the TOP
+    # Make +/- appear at TOP of grouped section like your preferred output
     try:
         ws.sheet_properties.outlinePr.summaryBelow = False
         ws.sheet_properties.outlinePr.applyStyles = True
@@ -674,12 +649,13 @@ def _write_formatted_pair_sheet(
             current_row += 1
             continue
 
-        # Expandable issue view
+        # Expandable issue view (group by ResultingIssue)
         sub["_SortKey"] = sub.apply(
             lambda r: _max_pct(r.get("LeftPct", None), r.get("RightPct", None)),
             axis=1,
         )
 
+        # Order issues by their max row descending so most severe issues come first
         group_max = (
             sub.groupby("ResultingIssue")["_SortKey"]
             .max()
@@ -692,6 +668,7 @@ def _write_formatted_pair_sheet(
             if g.empty:
                 continue
 
+            # Sort inside issue group so max is first
             g = g.sort_values(by="_SortKey", ascending=False, na_position="last")
 
             first = True
@@ -714,7 +691,7 @@ def _write_formatted_pair_sheet(
                     delta,
                     outline_level=0 if first else 1,
                     hidden=False if first else True,
-                    bold=True if first else False,
+                    bold=True if first else False,  # bold the max row
                 )
                 current_row += 1
                 first = False
