@@ -366,22 +366,38 @@ def _sanitize_sheet_name(name: str) -> str:
 
 
 def build_batch_comparison_workbook(
-    src_workbook: str,
-    pairs: Sequence[Tuple[str, str]],
-    threshold: float,
-    output_path: str,
+    src_workbook: Optional[str] = None,
+    pairs: Sequence[Tuple[str, str]] = (),
+    threshold: float = 0.0,
+    output_path: str = "",
     log_func=None,
     *,
     expandable_issue_view: bool = True,
+    workbook_path: Optional[str] = None,
+    **kwargs,
 ) -> str:
     """
-    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair,
-    using the same blue-block style as Combined_ViolationCTG_Comparison.xlsx.
+    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair.
+
+    Keyword compatibility:
+      - GUI may call this using src_workbook=...
+      - or workbook_path=...
+      - or older names; we gracefully accept them via **kwargs.
 
     If expandable_issue_view=True, each sheet uses Excel +/- grouping by Resulting Issue.
     """
     if not OPENPYXL_AVAILABLE:
         raise RuntimeError("openpyxl is required to build the batch workbook.")
+
+    # Backward/forward compatibility for callers:
+    # Accept src_workbook, workbook_path, or fall back to kwargs.
+    if src_workbook is None:
+        src_workbook = workbook_path
+    if src_workbook is None:
+        src_workbook = kwargs.get("src_workbook") or kwargs.get("workbook") or kwargs.get("path")
+
+    if not src_workbook:
+        raise ValueError("Missing source workbook path (src_workbook / workbook_path).")
 
     if log_func:
         log_func(
@@ -401,9 +417,9 @@ def build_batch_comparison_workbook(
 
     used_names: set[str] = set()
 
-    for idx, (left_sheet, right_sheet) in enumerate(pairs, start=1):
+    for (left_sheet, right_sheet) in pairs:
         if log_func:
-            log_func(f"Processing pair {idx}: '{left_sheet}' vs '{right_sheet}'...")
+            log_func(f"Processing pair: '{left_sheet}' vs '{right_sheet}'...")
 
         df_pair = build_pair_comparison_df(
             src_workbook, left_sheet, right_sheet, threshold, log_func=log_func
@@ -423,13 +439,14 @@ def build_batch_comparison_workbook(
                 ]
             )
 
-        base_name = f"{idx:02d}_{left_sheet}_vs_{right_sheet}"
+        # NEW: no numbering, and use " vs " instead of "_vs_"
+        base_name = f"{left_sheet} vs {right_sheet}"
         base_name = _sanitize_sheet_name(base_name)
 
         name = base_name
         counter = 2
         while name in used_names:
-            suffix = f"_{counter}"
+            suffix = f" ({counter})"
             name = _sanitize_sheet_name(base_name[: (31 - len(suffix))] + suffix)
             counter += 1
 
