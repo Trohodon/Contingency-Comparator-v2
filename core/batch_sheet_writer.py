@@ -3,15 +3,14 @@
 # Writes a batch comparison worksheet using the same blue-block style
 # as the Combined_ViolationCTG_Comparison workbook.
 #
-# Supports optional Excel +/- outline grouping by ResultingIssue:
-#   - first row in each issue group is visible
-#   - remaining rows are hidden with outlineLevel=1
-#   - ResultingIssue cell is blanked for hidden rows (visual grouping)
+# Key behavior:
+# - Expandable issue view uses Excel outline (+/-)
+# - Summary row is ABOVE detail rows (so +/- appears at the TOP like your "left" workbook)
+# - The first (max) row per Resulting Issue is bolded to stand out
 
 from __future__ import annotations
 
 from typing import Optional
-
 import math
 import pandas as pd
 
@@ -25,24 +24,25 @@ from openpyxl.utils import get_column_letter
 
 def apply_table_styles(ws: Worksheet):
     """
-    Set reasonable column widths for a formatted comparison sheet.
+    Set reasonable column widths and outline settings for a formatted comparison sheet.
     """
     widths = {
         2: 45,  # B: Contingency Events
         3: 45,  # C: Resulting Issue
         4: 15,  # D: Left %
         5: 15,  # E: Right %
-        6: 22,  # F: Delta
+        6: 22,  # F: Delta / Status
     }
     for col_idx, width in widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-    # Enable outlining (+/-) behavior in Excel
+    # IMPORTANT:
+    # summaryBelow=False makes Excel treat the TOP row as the summary row,
+    # so the +/- control appears at the top of each group (matches your "left" workbook).
     try:
-        ws.sheet_properties.outlinePr.summaryBelow = True
+        ws.sheet_properties.outlinePr.summaryBelow = False
         ws.sheet_properties.outlinePr.applyStyles = True
     except Exception:
-        # Not critical; Excel still usually honors outlineLevel/hidden.
         pass
 
 
@@ -79,13 +79,8 @@ def _normalize_issue_series(series: pd.Series) -> pd.Series:
     """
     Forward-fill blanks so that blank ResultingIssue inherits the issue above.
 
-    IMPORTANT:
-    We intentionally avoid pandas Series.replace(...) here because some pandas
-    versions can throw:
+    Avoid pandas Series.replace(...) due to pandas version quirks that can throw:
       "'regex' must be a string ... you passed a 'bool'"
-    depending on dtype / None handling.
-
-    This implementation is dtype-safe.
     """
     s = series.copy()
 
@@ -98,7 +93,6 @@ def _normalize_issue_series(series: pd.Series) -> pd.Series:
             return True
         return False
 
-    # Mask blanks to NA, then ffill
     mask = s.apply(is_blank)
     s = s.mask(mask)
     s = s.ffill()
@@ -139,8 +133,10 @@ def _write_data_row(
     left_pct,
     right_pct,
     delta,
+    *,
     outline_level: int = 0,
     hidden: bool = False,
+    bold: bool = False,
 ):
     values = [cont, issue, left_pct, right_pct, delta]
 
@@ -148,6 +144,21 @@ def _write_data_row(
         cell = ws.cell(row=row, column=2 + col_offset)
         cell.value = val
         cell.border = THIN_BORDER
+
+        # Bold summary/max row for readability
+        if bold:
+            # Preserve existing font characteristics where relevant
+            base = cell.font or Font()
+            cell.font = Font(
+                name=base.name,
+                size=base.size,
+                bold=True,
+                italic=base.italic,
+                vertAlign=base.vertAlign,
+                underline=base.underline,
+                strike=base.strike,
+                color=base.color,
+            )
 
         if col_offset in (0, 1):
             cell.alignment = CELL_ALIGN_WRAP
@@ -157,7 +168,7 @@ def _write_data_row(
         if col_offset in (2, 3) and isinstance(val, (float, int)):
             cell.number_format = "0.00"
 
-    # Row outline / hidden (for +/-)
+    # Outline / hidden controls (Excel +/-)
     try:
         ws.row_dimensions[row].outlineLevel = int(outline_level)
         ws.row_dimensions[row].hidden = bool(hidden)
@@ -178,8 +189,9 @@ def write_formatted_pair_sheet(
     If expandable_issue_view=True:
       - groups within each CaseType block by ResultingIssue
       - sorts each issue group by max(LeftPct, RightPct) desc
-      - keeps the top row visible, hides the rest as outline level 1 (Excel +/-)
-      - blanks Resulting Issue on hidden rows for readability
+      - keeps the top row visible + bolded, hides the rest (outlineLevel=1)
+      - blanks ResultingIssue on hidden rows for readability
+      - outline summary is ABOVE details (summaryBelow=False), so +/- appears at top
     """
     ws = wb.create_sheet(title=ws_name)
     apply_table_styles(ws)
@@ -207,7 +219,6 @@ def write_formatted_pair_sheet(
         current_row += 1
 
         if not expandable_issue_view:
-            # Write rows as-is
             for _, r in sub.iterrows():
                 cont = str(r.get("Contingency", "") or "")
                 issue = str(r.get("ResultingIssue", "") or "")
@@ -225,6 +236,7 @@ def write_formatted_pair_sheet(
                     delta,
                     outline_level=0,
                     hidden=False,
+                    bold=False,
                 )
                 current_row += 1
 
@@ -232,7 +244,6 @@ def write_formatted_pair_sheet(
             continue
 
         # Expandable: group by issue, sort each group by max pct desc
-        # (We want the "main" row per issue to be the highest loading.)
         sub["_SortKey"] = sub.apply(
             lambda r: _max_pct(r.get("LeftPct", None), r.get("RightPct", None)),
             axis=1,
@@ -266,6 +277,7 @@ def write_formatted_pair_sheet(
                 right_pct = r.get("RightPct", None)
                 delta = str(r.get("DeltaDisplay", "") or "")
 
+                # Summary row visible + bold; detail rows hidden
                 _write_data_row(
                     ws,
                     current_row,
@@ -276,6 +288,7 @@ def write_formatted_pair_sheet(
                     delta,
                     outline_level=0 if first else 1,
                     hidden=False if first else True,
+                    bold=True if first else False,
                 )
                 current_row += 1
                 first = False
