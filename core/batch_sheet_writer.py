@@ -1,310 +1,221 @@
-# core/batch_sheet_writer.py
-#
-# Writes a batch comparison worksheet using the same blue-block style
-# as the Combined_ViolationCTG_Comparison workbook.
-#
-# Key behavior:
-# - Expandable issue view uses Excel outline (+/-)
-# - Summary row is ABOVE detail rows (so +/- appears at the TOP like your "left" workbook)
-# - The first (max) row per Resulting Issue is bolded to stand out
+# batch_sheet_writer.py
+# Writes a formatted "pair comparison" worksheet into an output workbook.
 
 from __future__ import annotations
 
+import os
+import time
 from typing import Optional
-import math
+
 import pandas as pd
 
-from openpyxl import Workbook
-from openpyxl.worksheet.worksheet import Worksheet
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
-# ===== Formatting helpers ====================================================
-
-def apply_table_styles(ws: Worksheet):
-    """
-    Set reasonable column widths and outline settings for a formatted comparison sheet.
-    """
-    widths = {
-        2: 45,  # B: Contingency Events
-        3: 45,  # C: Resulting Issue
-        4: 15,  # D: Left %
-        5: 15,  # E: Right %
-        6: 22,  # F: Delta / Status
-    }
-    for col_idx, width in widths.items():
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
-
-    # Make outline symbols visible + summary row above details
-    try:
-        ws.sheet_properties.outlinePr.summaryBelow = False
-        ws.sheet_properties.outlinePr.summaryRight = False
-        ws.sheet_properties.outlinePr.applyStyles = True
-    except Exception:
-        pass
-
-    try:
-        ws.sheet_view.showOutlineSymbols = True
-    except Exception:
-        pass
-
-
-HEADER_FILL = PatternFill("solid", fgColor="305496")  # dark blue
-HEADER_FONT = Font(color="FFFFFF", bold=True)
-TITLE_FILL = HEADER_FILL
-TITLE_FONT = Font(color="FFFFFF", bold=True, size=12)
-
-THIN_BORDER = Border(
-    left=Side(style="thin"),
-    right=Side(style="thin"),
-    top=Side(style="thin"),
-    bottom=Side(style="thin"),
-)
-
-CELL_ALIGN_WRAP = Alignment(wrap_text=True, vertical="top")
-CELL_ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-
-def _is_nan(x) -> bool:
-    return isinstance(x, float) and math.isnan(x)
-
-
-def _max_pct(left: Optional[float], right: Optional[float]) -> float:
-    vals = []
-    if left is not None and not _is_nan(left):
-        vals.append(float(left))
-    if right is not None and not _is_nan(right):
-        vals.append(float(right))
-    return max(vals) if vals else float("-inf")
-
-
-def _normalize_issue_series(series: pd.Series) -> pd.Series:
-    """
-    Forward-fill blanks so that blank ResultingIssue inherits the issue above.
-
-    Avoid pandas Series.replace(...) due to pandas version quirks that can throw:
-      "'regex' must be a string ... you passed a 'bool'"
-    """
-    s = series.copy()
-
-    def is_blank(v) -> bool:
-        if v is None:
-            return True
-        if isinstance(v, float) and math.isnan(v):
-            return True
-        if isinstance(v, str) and v.strip() == "":
-            return True
-        return False
-
-    mask = s.apply(is_blank)
-    s = s.mask(mask)
-    s = s.ffill()
-    return s.fillna("")
-
-
-def _write_title_row(ws: Worksheet, row: int, title: str):
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
-    cell = ws.cell(row=row, column=2)
-    cell.value = title
-    cell.fill = TITLE_FILL
-    cell.font = TITLE_FONT
-    cell.alignment = CELL_ALIGN_CENTER
-
-
-def _write_header_row(ws: Worksheet, row: int):
-    headers = [
-        "Contingency Events",
-        "Resulting Issue",
-        "Left %",
-        "Right %",
-        "Δ% (Right - Left) / Status",
-    ]
-    for col_offset, header in enumerate(headers):
-        cell = ws.cell(row=row, column=2 + col_offset)
-        cell.value = header
-        cell.fill = HEADER_FILL
-        cell.font = HEADER_FONT
-        cell.alignment = CELL_ALIGN_CENTER
-        cell.border = THIN_BORDER
-
-
-def _write_data_row(
-    ws: Worksheet,
-    row: int,
-    cont: str,
-    issue: str,
-    left_pct,
-    right_pct,
-    delta,
-    *,
-    outline_level: int = 0,
-    hidden: bool = False,
-    bold: bool = False,
-):
-    values = [cont, issue, left_pct, right_pct, delta]
-
-    for col_offset, val in enumerate(values):
-        cell = ws.cell(row=row, column=2 + col_offset)
-        cell.value = val
-        cell.border = THIN_BORDER
-
-        # Bold summary/max row for readability
-        if bold:
-            base = cell.font or Font()
-            cell.font = Font(
-                name=base.name,
-                size=base.size,
-                bold=True,
-                italic=base.italic,
-                vertAlign=base.vertAlign,
-                underline=base.underline,
-                strike=base.strike,
-                color=base.color,
-            )
-
-        if col_offset in (0, 1):
-            cell.alignment = CELL_ALIGN_WRAP
-        else:
-            cell.alignment = Alignment(horizontal="right", vertical="top")
-
-        if col_offset in (2, 3) and isinstance(val, (float, int)):
-            cell.number_format = "0.00"
-
-    # Outline / hidden controls (Excel +/-)
-    try:
-        ws.row_dimensions[row].outlineLevel = int(outline_level)
-        ws.row_dimensions[row].hidden = bool(hidden)
-    except Exception:
-        pass
-
-
 def write_formatted_pair_sheet(
-    wb: Workbook,
-    ws_name: str,
+    wb,
+    sheet_name: str,
     df_pair: pd.DataFrame,
     *,
     expandable_issue_view: bool = True,
-):
+) -> None:
     """
-    Create one sheet in the batch workbook using the blue-block style.
-
-    If expandable_issue_view=True:
-      - groups within each CaseType block by ResultingIssue
-      - sorts each issue group by max(LeftPct, RightPct) desc
-      - keeps the top row visible + bolded, hides the rest (outlineLevel=1)
-      - blanks ResultingIssue on hidden rows for readability
-      - outline summary is ABOVE details (summaryBelow=False), so +/- appears at top
-      - marks the summary row as collapsed so Excel shows the + correctly
+    Writes one comparison sheet in the style you prefer:
+      - groups by Resulting Issue (LimViolID)
+      - sorts groups by max percent (worst first)
+      - within group sorts by CTG max percent
+      - bolds the highest line(s) within each group
+      - optional "expandable" layout for Excel +/- controls
     """
-    ws = wb.create_sheet(title=ws_name)
-    apply_table_styles(ws)
+    ws = wb.create_sheet(sheet_name)
 
-    if df_pair is None or df_pair.empty:
-        ws.cell(row=2, column=2).value = "No rows above threshold."
-        return
+    # Styles
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    header_font = Font(bold=True, color="FFFFFF")
+    subheader_fill = PatternFill("solid", fgColor="D9E1F2")
+    group_fill = PatternFill("solid", fgColor="F2F2F2")
+    bold_font = Font(bold=True)
+    normal_font = Font(bold=False)
 
-    current_row = 2
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
-    for case_type_pretty in ["ACCA LongTerm", "ACCA", "DCwAC"]:
-        sub = df_pair[df_pair["CaseType"] == case_type_pretty].copy()
-        if sub.empty:
-            continue
+    thin = Side(style="thin", color="A6A6A6")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-        # Normalize blank issues -> same as above (safety net)
-        if "ResultingIssue" not in sub.columns:
-            sub["ResultingIssue"] = ""
-        sub["ResultingIssue"] = _normalize_issue_series(sub["ResultingIssue"])
+    # Columns to output
+    # NOTE: These internal names come from comparator.build_case_type_comparison
+    # and match your existing formatting.
+    col_casetype = "CaseType"
+    col_ctg = "CTGLabel"
+    col_issue = "LimViolID"
+    col_left = "LimViolPct (Left)"
+    col_right = "LimViolPct (Right)"
+    col_delta = "Delta"
+    col_max = "MaxPct"
 
-        # Title + header rows
-        _write_title_row(ws, current_row, case_type_pretty)
-        current_row += 1
-        _write_header_row(ws, current_row)
-        current_row += 1
+    # If any are missing, fail gracefully
+    for req in [col_casetype, col_ctg, col_issue, col_left, col_right, col_delta, col_max]:
+        if req not in df_pair.columns:
+            raise ValueError(f"Missing required column in df_pair: {req}")
 
-        if not expandable_issue_view:
-            for _, r in sub.iterrows():
-                cont = str(r.get("Contingency", "") or "")
-                issue = str(r.get("ResultingIssue", "") or "")
-                left_pct = r.get("LeftPct", None)
-                right_pct = r.get("RightPct", None)
-                delta = str(r.get("DeltaDisplay", "") or "")
+    df = df_pair.copy()
 
-                _write_data_row(
-                    ws,
-                    current_row,
-                    cont,
-                    issue,
-                    left_pct,
-                    right_pct,
-                    delta,
-                    outline_level=0,
-                    hidden=False,
-                    bold=False,
-                )
-                current_row += 1
+    # Group max for ordering
+    df["__group_max"] = df.groupby([col_issue])[col_max].transform("max")
+    df = df.sort_values(by=["__group_max", col_max], ascending=[False, False], na_position="last")
 
-            current_row += 1
-            continue
+    # Header row
+    headers = [
+        "Contingency Event",
+        "Resulting Issue",
+        "Left %",
+        "Right %",
+        "Δ (Right-Left)",
+    ]
+    for c, h in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=c, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = border
 
-        # Expandable: group by issue, sort each group by max pct desc
-        sub["_SortKey"] = sub.apply(
-            lambda r: _max_pct(r.get("LeftPct", None), r.get("RightPct", None)),
-            axis=1,
+    ws.row_dimensions[1].height = 22
+
+    # Write rows
+    start_row = 2
+    rows = []
+    for _, r in df.iterrows():
+        rows.append(
+            (
+                str(r[col_ctg]) if r[col_ctg] is not None else "",
+                str(r[col_issue]) if r[col_issue] is not None else "",
+                r[col_left],
+                r[col_right],
+                r[col_delta],
+                r[col_max],  # for bolding
+            )
         )
 
-        group_max = (
-            sub.groupby("ResultingIssue")["_SortKey"]
-            .max()
-            .sort_values(ascending=False)
-        )
-        ordered_issues = list(group_max.index)
+    # Expandable layout: group header rows + indented children
+    current_issue = None
+    group_start_row = None
+    group_rows = []
 
-        for issue_key in ordered_issues:
-            g = sub[sub["ResultingIssue"] == issue_key].copy()
-            if g.empty:
-                continue
+    def flush_group():
+        nonlocal group_rows, group_start_row
+        if not group_rows:
+            return
 
-            g = g.sort_values(by="_SortKey", ascending=False, na_position="last")
+        # Determine max row(s) in this group for bolding
+        vals = [gr[5] for gr in group_rows if gr[5] is not None]
+        vmax = max(vals) if vals else None
 
-            summary_row_index = None
-            first = True
+        if expandable_issue_view:
+            # Add a group header row (issue name at top)
+            header_row = group_rows[0][1]
+            ws.cell(row=group_start_row, column=1, value="").alignment = left
+            ws.cell(row=group_start_row, column=2, value=header_row).alignment = left
+            for c in range(1, 6):
+                ws.cell(row=group_start_row, column=c).fill = group_fill
+                ws.cell(row=group_start_row, column=c).border = border
+            ws.cell(row=group_start_row, column=2).font = bold_font
 
-            for _, r in g.iterrows():
-                cont = str(r.get("Contingency", "") or "")
-                issue = str(r.get("ResultingIssue", "") or "")
+            # Child rows start after group header
+            child_start = group_start_row + 1
+            for i, gr in enumerate(group_rows):
+                rr = child_start + i
+                ctg, issue, l, r, d, m = gr
+                ws.cell(row=rr, column=1, value=ctg).alignment = left
+                ws.cell(row=rr, column=2, value="").alignment = left  # keep issue blank under group
+                ws.cell(row=rr, column=3, value=l)
+                ws.cell(row=rr, column=4, value=r)
+                ws.cell(row=rr, column=5, value=d)
 
-                # Blank issue text for the hidden (detail) rows
-                issue_display = issue if first else ""
+                # formats
+                for c in [3, 4, 5]:
+                    ws.cell(row=rr, column=c).alignment = center
+                    ws.cell(row=rr, column=c).number_format = "0.000"
 
-                left_pct = r.get("LeftPct", None)
-                right_pct = r.get("RightPct", None)
-                delta = str(r.get("DeltaDisplay", "") or "")
+                # bold max within group
+                if vmax is not None and m is not None and abs(m - vmax) < 1e-9:
+                    for c in range(1, 6):
+                        ws.cell(row=rr, column=c).font = bold_font
+                else:
+                    for c in range(1, 6):
+                        ws.cell(row=rr, column=c).font = normal_font
 
-                if first:
-                    summary_row_index = current_row
+                for c in range(1, 6):
+                    ws.cell(row=rr, column=c).border = border
 
-                _write_data_row(
-                    ws,
-                    current_row,
-                    cont,
-                    issue_display,
-                    left_pct,
-                    right_pct,
-                    delta,
-                    outline_level=0 if first else 1,
-                    hidden=False if first else True,
-                    bold=True if first else False,
-                )
-                current_row += 1
-                first = False
+            # Outline grouping for Excel +/- at TOP of group
+            # Children are grouped under the header row.
+            ws.row_dimensions[group_start_row].outlineLevel = 0
+            for rr in range(child_start, child_start + len(group_rows)):
+                ws.row_dimensions[rr].outlineLevel = 1
+                ws.row_dimensions[rr].hidden = True
 
-            # Mark the summary row as collapsed when there are details
-            try:
-                if summary_row_index is not None and len(g) > 1:
-                    ws.row_dimensions[summary_row_index].collapsed = True
-            except Exception:
-                pass
+        else:
+            # Non-expandable: just write normal rows with issue repeated
+            for i, gr in enumerate(group_rows):
+                rr = group_start_row + i
+                ctg, issue, l, r, d, m = gr
+                ws.cell(row=rr, column=1, value=ctg).alignment = left
+                ws.cell(row=rr, column=2, value=issue).alignment = left
+                ws.cell(row=rr, column=3, value=l)
+                ws.cell(row=rr, column=4, value=r)
+                ws.cell(row=rr, column=5, value=d)
 
-        # Blank row between blocks
-        current_row += 1
+                for c in [3, 4, 5]:
+                    ws.cell(row=rr, column=c).alignment = center
+                    ws.cell(row=rr, column=c).number_format = "0.000"
+
+                if vmax is not None and m is not None and abs(m - vmax) < 1e-9:
+                    for c in range(1, 6):
+                        ws.cell(row=rr, column=c).font = bold_font
+                else:
+                    for c in range(1, 6):
+                        ws.cell(row=rr, column=c).font = normal_font
+
+                for c in range(1, 6):
+                    ws.cell(row=rr, column=c).border = border
+
+        group_rows = []
+        group_start_row = None
+
+    r_idx = start_row
+    for row in rows:
+        # Yield periodically to keep UI responsive while writing large sheets
+        if (r_idx - start_row) % 300 == 0:
+            time.sleep(0)
+
+        ctg, issue, l, r, d, m = row
+        if issue != current_issue:
+            flush_group()
+            current_issue = issue
+            group_start_row = r_idx
+            group_rows = []
+            if expandable_issue_view:
+                # reserve one row for group header
+                r_idx += 1
+
+        group_rows.append((ctg, issue, l, r, d, m))
+        r_idx += 1
+
+    flush_group()
+
+    # Sheet settings
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "C2"  # keeps header and first 2 columns
+
+    # Column widths
+    ws.column_dimensions["A"].width = 55
+    ws.column_dimensions["B"].width = 65
+    ws.column_dimensions["C"].width = 12
+    ws.column_dimensions["D"].width = 12
+    ws.column_dimensions["E"].width = 14
+
+    # Enable outline symbols
+    ws.sheet_properties.outlinePr.summaryBelow = True
+    ws.sheet_properties.outlinePr.summaryRight = True
