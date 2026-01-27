@@ -77,8 +77,8 @@ def _parse_scenario_sheet(ws, log_func=None) -> pd.DataFrame:
             pretty = title_val.strip()
             case_type = CANONICAL_CASE_TYPES.get(pretty, pretty)
 
-            header_row = row_idx + 1
-            data_row = header_row + 1
+            # header row is row_idx+1; data begins row_idx+2
+            data_row = (row_idx + 1) + 1
 
             last_issue = None
             r = data_row
@@ -86,9 +86,9 @@ def _parse_scenario_sheet(ws, log_func=None) -> pd.DataFrame:
             while r <= max_row:
                 b = ws.cell(row=r, column=2).value  # CTGLabel
                 c = ws.cell(row=r, column=3).value  # LimViolID
+                d = ws.cell(row=r, column=4).value
                 e = ws.cell(row=r, column=5).value  # LimViolPct
 
-                d = ws.cell(row=r, column=4).value
                 if _is_blank(b) and _is_blank(c) and _is_blank(d) and _is_blank(e):
                     break
 
@@ -108,6 +108,7 @@ def _parse_scenario_sheet(ws, log_func=None) -> pd.DataFrame:
                 )
                 r += 1
 
+            # jump to row after separator
             row_idx = r + 1
         else:
             row_idx += 1
@@ -127,6 +128,33 @@ def load_sheet_as_df(workbook_path: str, sheet_name: str, log_func=None) -> pd.D
         raise ValueError(f"Sheet '{sheet_name}' not found in workbook.")
     ws = wb[sheet_name]
     return _parse_scenario_sheet(ws, log_func=log_func)
+
+
+def discover_scenario_sheets(workbook_path: str, log_func=None) -> List[str]:
+    """
+    Find ALL scenario sheets in the SOURCE workbook (in workbook order).
+
+    A "scenario sheet" is any sheet that parses into >= 1 row using the
+    formatted Combined_ViolationCTG_Comparison style (case-type blocks).
+    """
+    if not os.path.isfile(workbook_path):
+        raise FileNotFoundError(f"Workbook not found: {workbook_path}")
+
+    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+
+    scenario_sheets: List[str] = []
+    for name in wb.sheetnames:
+        try:
+            ws = wb[name]
+            df = _parse_scenario_sheet(ws, log_func=None)
+            if df is not None and not df.empty:
+                scenario_sheets.append(name)
+        except Exception:
+            continue
+
+    if log_func:
+        log_func(f"Discovered {len(scenario_sheets)} scenario sheets for Straight Comparison.")
+    return scenario_sheets
 
 
 # ---------------------------------------------------------------------------
@@ -168,12 +196,13 @@ def build_straight_comparison_df(
 
     def make_label(name: str) -> str:
         base = str(name).strip()
-        lab = base if len(base) <= 14 else base[:14]
+        # allow a bit more room (looks nicer in headers)
+        lab = base if len(base) <= 18 else base[:18]
         candidate = lab
         k = 2
         while candidate in used or candidate == "":
             suffix = f"_{k}"
-            candidate = (lab[: max(1, 14 - len(suffix))] + suffix)
+            candidate = (lab[: max(1, 18 - len(suffix))] + suffix)
             k += 1
         used.add(candidate)
         return candidate
@@ -215,6 +244,7 @@ def build_straight_comparison_df(
     master = master.rename(columns={"CaseTypePretty": "CaseType"})
     case_cols = [c for c in labels if c in master.columns]
 
+    # Threshold filter based on max across cases
     if case_cols:
         max_series = master[case_cols].max(axis=1, skipna=True)
         master = master[max_series.fillna(float("-inf")) >= float(threshold)].copy()
@@ -224,6 +254,7 @@ def build_straight_comparison_df(
             by=["CaseType", "_SortKey"], ascending=[True, False], na_position="last"
         ).drop(columns=["_SortKey"])
 
+    # Ensure all label columns exist
     for c in labels:
         if c not in master.columns:
             master[c] = None
@@ -253,11 +284,12 @@ CELL_ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=
 
 
 def _apply_table_styles(ws: Worksheet, num_cases: int):
-    ws.column_dimensions[get_column_letter(2)].width = 45  # B
-    ws.column_dimensions[get_column_letter(3)].width = 45  # C
+    ws.column_dimensions[get_column_letter(2)].width = 45  # B: Contingency Events
+    ws.column_dimensions[get_column_letter(3)].width = 45  # C: Resulting Issue
     for i in range(num_cases):
-        ws.column_dimensions[get_column_letter(4 + i)].width = 12
+        ws.column_dimensions[get_column_letter(4 + i)].width = 12  # D..: each scenario
 
+    # outline (Excel +/-)
     try:
         ws.sheet_properties.outlinePr.summaryBelow = False
         ws.sheet_properties.outlinePr.summaryRight = False
@@ -365,7 +397,7 @@ def write_formatted_straight_sheet(
 
     current_row = 2
     case_cols = list(case_labels)
-    last_col = 2 + 1 + len(case_cols)
+    last_col = 2 + 1 + len(case_cols)  # B..(2+len(headers)-1)
 
     for case_type_pretty in ["ACCA LongTerm", "ACCA", "DCwAC"]:
         sub = df[df["CaseType"] == case_type_pretty].copy()
@@ -387,6 +419,7 @@ def write_formatted_straight_sheet(
             current_row += 1
             continue
 
+        # Expandable: group by ResultingIssue, show top row, hide details
         sub["_SortKey"] = sub.apply(lambda rr: _max_across_cases(rr, case_cols), axis=1)
         group_max = sub.groupby("ResultingIssue")["_SortKey"].max().sort_values(ascending=False)
         ordered_issues = list(group_max.index)
