@@ -147,7 +147,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
     wb.remove(default_sheet)
 
     # Styles
-    title_fill = PatternFill(fill_type="solid", fgColor="1F4E78")
+    title_fill = PatternFill(fill_type="solid", fgColor="305496")
     title_font = Font(color="FFFFFF", bold=True, size=12)
 
     header_fill = PatternFill(fill_type="solid", fgColor="305496")
