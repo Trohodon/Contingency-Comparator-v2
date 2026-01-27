@@ -1,88 +1,266 @@
 # core/comparator.py
+#
+# Helpers for working with the formatted
+# Combined_ViolationCTG_Comparison.xlsx workbook and for building
+# batch comparison workbooks in a nicely formatted style.
+#
+# Public functions used by the GUI:
+#   - list_sheets(workbook_path)
+#   - build_case_type_comparison(...)
+#   - build_pair_comparison_df(...)
+#   - build_batch_comparison_workbook(...)
+#
 
 from __future__ import annotations
 
+from typing import Iterable, List, Dict, Optional, Sequence, Tuple
+
+import math
 import os
-from typing import Dict, List, Optional, Sequence, Tuple
-
 import pandas as pd
-from openpyxl import Workbook, load_workbook
-from openpyxl.utils import get_column_letter
 
-# We prefer using your formatting writer for batch sheets (outline +/- etc.)
 try:
-    from batch_sheet_writer import write_formatted_pair_sheet, apply_table_styles
-except Exception:
-    write_formatted_pair_sheet = None
-    apply_table_styles = None
+    from openpyxl import load_workbook, Workbook
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
+from core.batch_sheet_writer import write_formatted_pair_sheet
 
 
-# Canonical case-type ordering (used for sorting / grouping)
-CASE_TYPES_CANONICAL = [
-    "Branch MVA",
-    "Interface MW",
-    "Interface MVA",
-    "Voltage (PU)",
-    "Bus Voltage (PU)",
-    "Transformer MVA",
-    "DC Line",
-    "Other",
+# Mapping from the pretty case-type titles in the formatted sheet
+# to the canonical internal case-type names.
+CANONICAL_CASE_TYPES = {
+    "ACCA LongTerm": "ACCA_LongTerm",
+    "ACCA Long Term": "ACCA_LongTerm",  # just in case
+    "ACCA": "ACCA_P1,2,4,7",
+    "DCwAC": "DCwACver_P1-7",
+}
+
+# Canonical list (used by the GUI)
+CASE_TYPES_CANONICAL: List[str] = [
+    "ACCA_LongTerm",
+    "ACCA_P1,2,4,7",
+    "DCwACver_P1-7",
 ]
 
+# Reverse mapping so we can label rows nicely when exporting
+CANONICAL_TO_PRETTY = {
+    "ACCA_LongTerm": "ACCA LongTerm",
+    "ACCA_P1,2,4,7": "ACCA",
+    "DCwACver_P1-7": "DCwAC",
+}
 
-# -------------------------
-# Public API used by GUI
-# -------------------------
+
+# ---------------------------------------------------------------------------
+# Basic workbook helpers
+# ---------------------------------------------------------------------------
 
 def list_sheets(workbook_path: str) -> List[str]:
-    wb = load_workbook(workbook_path, read_only=True, data_only=True)
-    try:
-        return list(wb.sheetnames)
-    finally:
-        wb.close()
+    """
+    Return a list of sheet names from the given Excel workbook.
+    """
+    if not OPENPYXL_AVAILABLE:
+        raise RuntimeError("openpyxl is required for sheet listing and comparison.")
 
+    if not os.path.isfile(workbook_path):
+        raise FileNotFoundError(f"Workbook not found: {workbook_path}")
+
+    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    return list(wb.sheetnames)
+
+
+def _is_blank(v) -> bool:
+    if v is None:
+        return True
+    if isinstance(v, str) and v.strip() == "":
+        return True
+    return False
+
+
+def _parse_scenario_sheet(ws, log_func=None) -> pd.DataFrame:
+    """
+    Parse one formatted scenario sheet into a DataFrame with columns:
+
+        CaseType, CTGLabel, LimViolID, LimViolValue, LimViolPct
+
+    IMPORTANT FIX:
+      In the formatted workbook, Resulting Issue cells may be blank on
+      subsequent rows to visually group multiple contingencies under the same
+      issue. Those blanks mean "same as the issue above".
+
+      We forward-fill LimViolID *within each CaseType block* so that comparisons
+      treat blank issues as the same key, rather than a distinct blank key.
+    """
+    records: List[Dict] = []
+
+    max_row = ws.max_row or 1
+    row_idx = 1
+
+    while row_idx <= max_row:
+        title_cell = ws.cell(row=row_idx, column=2)  # column B
+        title_val = title_cell.value
+
+        # Identify a title row by non-empty text in B
+        if isinstance(title_val, str) and title_val.strip():
+            pretty_name = title_val.strip()
+            case_type = CANONICAL_CASE_TYPES.get(pretty_name, pretty_name)
+
+            # Header row is next; data row follows
+            header_row = row_idx + 1
+            data_row = header_row + 1
+
+            last_issue = None  # forward-fill within this block
+
+            r = data_row
+            while r <= max_row:
+                b = ws.cell(row=r, column=2).value  # CTGLabel / contingency
+                c = ws.cell(row=r, column=3).value  # LimViolID / resulting issue
+                d = ws.cell(row=r, column=4).value  # LimViolValue (MVA)
+                e = ws.cell(row=r, column=5).value  # LimViolPct (% loading)
+
+                # Stop when B..E are all blank
+                if _is_blank(b) and _is_blank(c) and _is_blank(d) and _is_blank(e):
+                    break
+
+                # Forward-fill resulting issue if blank
+                if _is_blank(c) and last_issue is not None:
+                    c = last_issue
+                else:
+                    if not _is_blank(c):
+                        last_issue = c
+
+                records.append(
+                    {
+                        "CaseType": case_type,
+                        "CTGLabel": b,
+                        "LimViolID": c,
+                        "LimViolValue": d,
+                        "LimViolPct": e,
+                    }
+                )
+                r += 1
+
+            # Jump to the row after the blank separator
+            row_idx = r + 1
+        else:
+            row_idx += 1
+
+    df = pd.DataFrame.from_records(records)
+    if log_func:
+        log_func(
+            f"Parsed {len(df)} rows from sheet '{ws.title}'. "
+            f"Columns: {list(df.columns)}"
+        )
+    return df
+
+
+def _load_sheet_as_df(workbook_path: str, sheet_name: str, log_func=None) -> pd.DataFrame:
+    """
+    Load a scenario sheet from the formatted workbook into a normalized DataFrame.
+    """
+    if not OPENPYXL_AVAILABLE:
+        raise RuntimeError("openpyxl is required for comparison.")
+
+    wb = load_workbook(workbook_path, data_only=True)
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"Sheet '{sheet_name}' not found in workbook.")
+
+    ws = wb[sheet_name]
+    df = _parse_scenario_sheet(ws, log_func=log_func)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Per–case-type comparison for the split-screen GUI
+# ---------------------------------------------------------------------------
 
 def build_case_type_comparison(
     workbook_path: str,
-    left_sheet: str,
-    right_sheet: str,
+    base_sheet: str,
+    new_sheet: str,
     case_type: str,
-    max_rows: int = 5000,
+    max_rows: Optional[int] = None,
+    log_func=None,
 ) -> pd.DataFrame:
     """
-    Used by the GUI "live view" for a single case type.
+    Build a left/right comparison DataFrame for a single case type.
+
+    Returns a DataFrame with columns:
+
+        Contingency, ResultingIssue, LeftPct, RightPct, DeltaPct
+
+    Rows are sorted by Percent Loading (highest to lowest). The primary
+    sort key is RightPct (new sheet). If all RightPct values are NaN,
+    we fall back to LeftPct.
     """
-    df_pair = build_pair_comparison_df(
-        workbook_path=workbook_path,
-        left_sheet=left_sheet,
-        right_sheet=right_sheet,
-        threshold=0.0,
-        log_func=None,
+    if case_type not in CASE_TYPES_CANONICAL:
+        raise ValueError(f"Unknown case type: {case_type}")
+
+    base_df = _load_sheet_as_df(workbook_path, base_sheet, log_func=log_func)
+    new_df = _load_sheet_as_df(workbook_path, new_sheet, log_func=log_func)
+
+    base_df = base_df[base_df["CaseType"] == case_type].copy()
+    new_df = new_df[new_df["CaseType"] == case_type].copy()
+
+    if log_func:
+        log_func(f"  [{case_type}] base rows={len(base_df)}, new rows={len(new_df)}")
+
+    if base_df.empty and new_df.empty:
+        if log_func:
+            log_func(f"  [{case_type}] No contingencies in either sheet.")
+        return pd.DataFrame(
+            columns=["Contingency", "ResultingIssue", "LeftPct", "RightPct", "DeltaPct"]
+        )
+
+    base_df = base_df.rename(columns={"LimViolPct": "Left_Pct"})
+    new_df = new_df.rename(columns={"LimViolPct": "Right_Pct"})
+
+    key_cols = ["CTGLabel", "LimViolID"]
+    left_cols = key_cols + ["Left_Pct"]
+    right_cols = key_cols + ["Right_Pct"]
+
+    merged = pd.merge(
+        base_df[left_cols],
+        new_df[right_cols],
+        on=key_cols,
+        how="outer",
     )
 
-    df = df_pair[df_pair["CaseType"] == case_type].copy()
-    if len(df) > max_rows:
-        df = df.head(max_rows).copy()
-    return df.reset_index(drop=True)
+    merged["Delta_Pct"] = merged["Right_Pct"] - merged["Left_Pct"]
 
-
-def compare_scenarios(
-    workbook_path: str,
-    left_sheet: str,
-    right_sheet: str,
-    threshold: float = 0.0,
-    mode: str = "expanded",
-) -> pd.DataFrame:
-    """
-    Convenience: full-sheet comparison (all case types). The GUI may or may not use this.
-    """
-    return build_pair_comparison_df(
-        workbook_path=workbook_path,
-        left_sheet=left_sheet,
-        right_sheet=right_sheet,
-        threshold=threshold,
-        log_func=None,
+    result = merged.rename(
+        columns={
+            "CTGLabel": "Contingency",
+            "LimViolID": "ResultingIssue",
+            "Left_Pct": "LeftPct",
+            "Right_Pct": "RightPct",
+            "Delta_Pct": "DeltaPct",
+        }
     )
+
+    sort_series = result["RightPct"]
+    if sort_series.notna().any():
+        result["_SortPct"] = sort_series
+    else:
+        result["_SortPct"] = result["LeftPct"]
+
+    result = result.sort_values(by="_SortPct", ascending=False, na_position="last").drop(
+        columns=["_SortPct"]
+    )
+
+    if max_rows is not None and max_rows > 0:
+        result = result.head(max_rows)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Batch export helpers for the build-list queue
+# ---------------------------------------------------------------------------
+
+def _is_nan(x) -> bool:
+    return isinstance(x, float) and math.isnan(x)
 
 
 def build_pair_comparison_df(
@@ -93,414 +271,197 @@ def build_pair_comparison_df(
     log_func=None,
 ) -> pd.DataFrame:
     """
-    Returns a pairwise comparison dataframe with columns expected by batch_sheet_writer:
-      CaseType, Contingency, ResultingIssue, LeftPct, RightPct, DeltaPct, DeltaDisplay
+    Build a single flat DataFrame for one (left_sheet, right_sheet) pair,
+    combining all case types.
+
+    Columns:
+      CaseType, Contingency, ResultingIssue, LeftPct, RightPct, DeltaDisplay
+
+    Threshold logic matches the GUI.
     """
-    log = log_func or (lambda _m: None)
+    records: List[Dict] = []
 
-    wb = load_workbook(workbook_path, read_only=True, data_only=True)
-    try:
-        df_left = _parse_scenario_sheet(wb[left_sheet])
-        df_right = _parse_scenario_sheet(wb[right_sheet])
-    finally:
-        wb.close()
+    for case_type in CASE_TYPES_CANONICAL:
+        pretty = CANONICAL_TO_PRETTY.get(case_type, case_type)
 
-    df = _compare_two(df_left, df_right)
+        df = build_case_type_comparison(
+            workbook_path,
+            base_sheet=left_sheet,
+            new_sheet=right_sheet,
+            case_type=case_type,
+            max_rows=None,
+            log_func=log_func,
+        )
 
-    if threshold and threshold > 0:
-        keep = (df["LeftPct"].fillna(-1) >= threshold) | (df["RightPct"].fillna(-1) >= threshold)
-        df = df.loc[keep].copy()
+        if df.empty:
+            continue
 
-    # Delta display
-    df["DeltaDisplay"] = df["DeltaPct"].apply(_fmt_delta)
+        if log_func:
+            log_func(f"  Pair {left_sheet} vs {right_sheet} | {pretty}: raw rows={len(df)}")
 
-    # Sort (case type order, then max pct desc)
-    df["_max"] = df[["LeftPct", "RightPct"]].max(axis=1, skipna=True)
-    df["_case_rank"] = df["CaseType"].apply(_case_type_rank)
+        for _, row in df.iterrows():
+            cont = str(row.get("Contingency", "") or "")
+            issue = row.get("ResultingIssue", "")
+            issue = "" if issue is None else str(issue)
 
-    df.sort_values(
-        by=["_case_rank", "_max", "DeltaPct", "Contingency", "ResultingIssue"],
-        ascending=[True, False, False, True, True],
-        inplace=True,
-        kind="mergesort",
-    )
+            left_pct = row.get("LeftPct", math.nan)
+            right_pct = row.get("RightPct", math.nan)
+            delta_pct = row.get("DeltaPct", math.nan)
 
-    df.drop(columns=["_max", "_case_rank"], inplace=True)
-    return df.reset_index(drop=True)
+            values = []
+            if not _is_nan(left_pct):
+                values.append(float(left_pct))
+            if not _is_nan(right_pct):
+                values.append(float(right_pct))
+
+            if not values:
+                continue
+
+            if max(values) < threshold:
+                continue
+
+            if _is_nan(left_pct) and not _is_nan(right_pct):
+                delta_text = "Only in right"
+            elif not _is_nan(left_pct) and _is_nan(right_pct):
+                delta_text = "Only in left"
+            elif _is_nan(left_pct) and _is_nan(right_pct):
+                delta_text = ""
+            else:
+                try:
+                    delta_text = f"{float(delta_pct):.2f}"
+                except Exception:
+                    delta_text = str(delta_pct)
+
+            records.append(
+                {
+                    "CaseType": pretty,
+                    "Contingency": cont,
+                    "ResultingIssue": issue,
+                    "LeftPct": float(left_pct) if not _is_nan(left_pct) else None,
+                    "RightPct": float(right_pct) if not _is_nan(right_pct) else None,
+                    "DeltaDisplay": delta_text,
+                }
+            )
+
+    df_all = pd.DataFrame.from_records(records)
+
+    # Keep ordering nice for non-expandable views (expandable view re-sorts per issue anyway)
+    if not df_all.empty:
+        sort_vals = df_all[["LeftPct", "RightPct"]].max(axis=1)
+        df_all["_SortKey"] = sort_vals
+        df_all = df_all.sort_values(
+            by=["CaseType", "_SortKey"], ascending=[True, False], na_position="last"
+        ).drop(columns=["_SortKey"])
+
+    return df_all
+
+
+def _sanitize_sheet_name(name: str) -> str:
+    invalid = set(r'[]:*?/\\')
+    cleaned = "".join(ch if ch not in invalid else "_" for ch in name)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        cleaned = "Sheet"
+    return cleaned[:31]
 
 
 def build_batch_comparison_workbook(
-    src_workbook: str,
-    pairs: Sequence[Tuple[str, str]],
-    threshold: float,
-    output_path: str,
+    src_workbook: Optional[str] = None,
+    pairs: Sequence[Tuple[str, str]] = (),
+    threshold: float = 0.0,
+    output_path: str = "",
     log_func=None,
-    **_kwargs,   # extra safety if older callers pass unexpected keywords
+    *,
+    expandable_issue_view: bool = True,
+    workbook_path: Optional[str] = None,
+    **kwargs,
 ) -> str:
     """
-    Builds your batch workbook:
-      - queued pairwise sheets
-      - ALWAYS appends a final sheet: "Straight Comparison" (all original sheets wide)
+    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair.
+
+    Keyword compatibility:
+      - GUI may call this using src_workbook=...
+      - or workbook_path=...
+      - or older names; we gracefully accept them via **kwargs.
+
+    If expandable_issue_view=True, each sheet uses Excel +/- grouping by Resulting Issue.
     """
-    log = log_func or (lambda _m: None)
-    pairs = list(pairs or [])
+    if not OPENPYXL_AVAILABLE:
+        raise RuntimeError("openpyxl is required to build the batch workbook.")
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    # Backward/forward compatibility for callers:
+    # Accept src_workbook, workbook_path, or fall back to kwargs.
+    if src_workbook is None:
+        src_workbook = workbook_path
+    if src_workbook is None:
+        src_workbook = kwargs.get("src_workbook") or kwargs.get("workbook") or kwargs.get("path")
 
-    # Load source sheet order once
-    wb_src = load_workbook(src_workbook, read_only=True, data_only=True)
-    try:
-        src_sheet_order = list(wb_src.sheetnames)
-    finally:
-        wb_src.close()
+    if not src_workbook:
+        raise ValueError("Missing source workbook path (src_workbook / workbook_path).")
 
-    wb_out = Workbook()
-    # remove default
-    if wb_out.worksheets:
-        wb_out.remove(wb_out.worksheets[0])
+    if log_func:
+        log_func(
+            f"\n=== Building batch comparison workbook ===\n"
+            f"Source: {src_workbook}\n"
+            f"Output: {output_path}\n"
+            f"Threshold: {threshold:.2f}%\n"
+            f"Expandable issue view (+/-): {expandable_issue_view}\n"
+        )
 
-    # -------------------------
-    # 1) queued pairwise sheets
-    # -------------------------
-    log(f"Building queued workbook with {len(pairs)} pair sheet(s)...")
+    if not pairs:
+        raise ValueError("No comparison pairs provided.")
 
-    for left_sheet, right_sheet in pairs:
-        log(f"Comparing: {left_sheet} vs {right_sheet}")
+    wb = Workbook()
+    default_sheet = wb.active
+    wb.remove(default_sheet)
+
+    used_names: set[str] = set()
+
+    for (left_sheet, right_sheet) in pairs:
+        if log_func:
+            log_func(f"Processing pair: '{left_sheet}' vs '{right_sheet}'...")
+
         df_pair = build_pair_comparison_df(
-            workbook_path=src_workbook,
-            left_sheet=left_sheet,
-            right_sheet=right_sheet,
-            threshold=threshold,
-            log_func=None,  # keep logging here, not inside parser loop
+            src_workbook, left_sheet, right_sheet, threshold, log_func=log_func
         )
 
-        desired_name = f"{left_sheet} vs {right_sheet}"
-        ws_name = _safe_unique_sheet_name(wb_out, desired_name)
-
-        if write_formatted_pair_sheet is not None:
-            # batch_sheet_writer creates & formats the sheet
-            write_formatted_pair_sheet(
-                wb=wb_out,
-                ws_name=ws_name,
-                df_pair=df_pair,
-                expandable_issue_view=True,
+        if df_pair.empty:
+            df_pair = pd.DataFrame(
+                [
+                    {
+                        "CaseType": "",
+                        "Contingency": "No rows above threshold.",
+                        "ResultingIssue": "",
+                        "LeftPct": None,
+                        "RightPct": None,
+                        "DeltaDisplay": "",
+                    }
+                ]
             )
-        else:
-            # fallback (still works)
-            ws = wb_out.create_sheet(ws_name)
-            _write_df_basic(ws, df_pair)
 
-        log(f"  Added sheet: {ws_name}")
+        # NEW: no numbering, and use " vs " instead of "_vs_"
+        base_name = f"{left_sheet} vs {right_sheet}"
+        base_name = _sanitize_sheet_name(base_name)
 
-    # -------------------------
-    # 2) Straight Comparison (ALWAYS LAST)
-    # -------------------------
-    log("Building final sheet: Straight Comparison (all originals together)...")
+        name = base_name
+        counter = 2
+        while name in used_names:
+            suffix = f" ({counter})"
+            name = _sanitize_sheet_name(base_name[: (31 - len(suffix))] + suffix)
+            counter += 1
 
-    # "Original sheets" = all sheets in the source workbook, in their original order.
-    # (This guarantees “big picture” no matter how the user queued pairs.)
-    straight_sheet_order = src_sheet_order[:]
+        used_names.add(name)
 
-    df_straight = _build_straight_comparison_df(
-        workbook_path=src_workbook,
-        sheets=straight_sheet_order,
-        threshold=threshold,
-    )
+        write_formatted_pair_sheet(
+            wb,
+            name,
+            df_pair,
+            expandable_issue_view=expandable_issue_view,
+        )
 
-    ws_compare_name = _safe_unique_sheet_name(wb_out, "Straight Comparison")
-    ws_compare = wb_out.create_sheet(ws_compare_name)
-    _write_straight_comparison_sheet(
-        ws=ws_compare,
-        df=df_straight,
-        sheet_order=straight_sheet_order,
-    )
+    wb.save(output_path)
 
-    log(f"  Added sheet: {ws_compare_name}")
+    if log_func:
+        log_func(f"Batch comparison workbook written to:\n{output_path}")
 
-    wb_out.save(output_path)
-    log(f"Saved: {output_path}")
     return output_path
-
-
-# -------------------------
-# Internals
-# -------------------------
-
-def _parse_scenario_sheet(ws) -> pd.DataFrame:
-    """
-    Normalizes a scenario sheet into:
-      CaseType, Contingency, ResultingIssue, Limit, Percent
-
-    Assumes:
-      - 2 header rows
-      - case-type headers appear as [None, "Branch MVA", None, None, None]
-      - data columns:
-          A: Contingency
-          B: ResultingIssue
-          D: Limit (MVA)   (optional)
-          E: Percent       (optional)
-    """
-    rows = list(ws.iter_rows(values_only=True))
-    if len(rows) <= 2:
-        return pd.DataFrame(columns=["CaseType", "Contingency", "ResultingIssue", "Limit", "Percent"])
-
-    data = rows[2:]  # skip 2 header rows
-    cur_case = None
-    out = []
-
-    for r in data:
-        a = r[0] if len(r) > 0 else None
-        b = r[1] if len(r) > 1 else None
-        d = r[3] if len(r) > 3 else None
-        e = r[4] if len(r) > 4 else None
-
-        # case-type header row
-        if a is None and isinstance(b, str) and b.strip() and (d is None and e is None):
-            cur_case = b.strip()
-            continue
-
-        out.append(
-            {
-                "CaseType": cur_case,
-                "Contingency": a,
-                "ResultingIssue": b,
-                "Limit": d,
-                "Percent": e,
-            }
-        )
-
-    df = pd.DataFrame(out)
-
-    # Forward-fill continuity rows (so keys stay stable)
-    for c in ["Contingency", "ResultingIssue", "CaseType"]:
-        df[c] = df[c].astype("string")
-
-    df["Contingency"] = df["Contingency"].where(df["Contingency"].notna() & (df["Contingency"].str.strip() != ""), pd.NA)
-    df["ResultingIssue"] = df["ResultingIssue"].where(df["ResultingIssue"].notna() & (df["ResultingIssue"].str.strip() != ""), pd.NA)
-
-    df["Contingency"] = df["Contingency"].ffill()
-    df["ResultingIssue"] = df["ResultingIssue"].ffill()
-
-    df["Limit"] = pd.to_numeric(df["Limit"], errors="coerce")
-    df["Percent"] = pd.to_numeric(df["Percent"], errors="coerce")
-
-    # drop totally empty
-    df = df.loc[~(df["Contingency"].isna() & df["ResultingIssue"].isna())].copy()
-    return df.reset_index(drop=True)
-
-
-def _compare_two(df_left: pd.DataFrame, df_right: pd.DataFrame) -> pd.DataFrame:
-    key = ["CaseType", "Contingency", "ResultingIssue"]
-
-    L = df_left[key + ["Percent"]].copy().rename(columns={"Percent": "LeftPct"})
-    R = df_right[key + ["Percent"]].copy().rename(columns={"Percent": "RightPct"})
-
-    # Collapse duplicates (messy source protection)
-    L = L.groupby(key, dropna=False, as_index=False).agg({"LeftPct": "max"})
-    R = R.groupby(key, dropna=False, as_index=False).agg({"RightPct": "max"})
-
-    df = pd.merge(L, R, on=key, how="outer")
-    df["DeltaPct"] = df["RightPct"] - df["LeftPct"]
-    return df
-
-
-def _build_straight_comparison_df(workbook_path: str, sheets: List[str], threshold: float) -> pd.DataFrame:
-    """
-    Wide compare across ALL original sheets:
-      Category (CaseType), Contingency, ResultingIssue, Limit,
-      then one column per sheet with Percent.
-    """
-    wb = load_workbook(workbook_path, read_only=True, data_only=True)
-    try:
-        parsed: Dict[str, pd.DataFrame] = {}
-        for s in sheets:
-            if s not in wb.sheetnames:
-                continue
-            parsed[s] = _parse_scenario_sheet(wb[s])
-    finally:
-        wb.close()
-
-    # Build union key set
-    key_cols = ["CaseType", "Contingency", "ResultingIssue"]
-
-    # base key frame
-    keys = None
-    limits_max = None
-    pct_series: Dict[str, pd.Series] = {}
-
-    for s in sheets:
-        df = parsed.get(s)
-        if df is None or df.empty:
-            continue
-
-        g = df.groupby(key_cols, dropna=False, as_index=True).agg(
-            Limit=("Limit", "max"),
-            Percent=("Percent", "max"),
-        )
-
-        if keys is None:
-            keys = g.index.to_frame(index=False)
-            limits_max = g["Limit"]
-        else:
-            keys = pd.concat([keys, g.index.to_frame(index=False)], ignore_index=True).drop_duplicates()
-            if limits_max is not None:
-                limits_max = pd.concat([limits_max, g["Limit"]]).groupby(level=[0, 1, 2]).max()
-
-        pct_series[s] = g["Percent"]
-
-    if keys is None or keys.empty:
-        return pd.DataFrame(columns=["Category", "Contingency", "ResultingIssue", "Limit"])
-
-    out = keys.copy()
-    out.rename(columns={"CaseType": "Category"}, inplace=True)
-
-    # attach limit
-    mi = pd.MultiIndex.from_frame(keys[key_cols])
-    out["Limit"] = limits_max.reindex(mi).to_numpy() if limits_max is not None else pd.NA
-
-    # attach each sheet's percent
-    for s in sheets:
-        ser = pct_series.get(s)
-        if ser is None:
-            out[s] = pd.NA
-        else:
-            out[s] = ser.reindex(mi).to_numpy()
-
-    # threshold filter: keep if ANY >= threshold
-    pct_cols = [s for s in sheets if s in out.columns]
-    if threshold and threshold > 0 and pct_cols:
-        maxpct = out[pct_cols].apply(pd.to_numeric, errors="coerce").max(axis=1, skipna=True)
-        out = out.loc[maxpct.fillna(-1) >= threshold].copy()
-
-    # sort: case type rank, then max percent desc
-    if pct_cols:
-        out["_maxpct"] = out[pct_cols].apply(pd.to_numeric, errors="coerce").max(axis=1, skipna=True)
-    else:
-        out["_maxpct"] = pd.NA
-    out["_case_rank"] = out["Category"].astype("string").apply(_case_type_rank)
-
-    out.sort_values(
-        by=["_case_rank", "_maxpct", "Contingency", "ResultingIssue"],
-        ascending=[True, False, True, True],
-        inplace=True,
-        kind="mergesort",
-    )
-    out.drop(columns=["_maxpct", "_case_rank"], inplace=True)
-    return out.reset_index(drop=True)
-
-
-def _write_straight_comparison_sheet(ws, df: pd.DataFrame, sheet_order: List[str]) -> None:
-    fixed = ["Contingency", "ResultingIssue", "Category", "Limit"]
-    pct_cols = [s for s in sheet_order if s in df.columns]
-    cols = fixed + pct_cols
-
-    # header
-    for j, c in enumerate(cols, start=1):
-        cell = ws.cell(row=1, column=j, value=c)
-        cell.font = cell.font.copy(bold=True)
-
-    # rows
-    for i, row in enumerate(df[cols].itertuples(index=False), start=2):
-        for j, v in enumerate(row, start=1):
-            ws.cell(row=i, column=j, value=_excel_safe(v))
-
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{ws.max_row}"
-
-    # widths
-    _set_width(ws, 1, 55)  # contingency
-    _set_width(ws, 2, 55)  # resulting issue
-    _set_width(ws, 3, 18)  # category
-    _set_width(ws, 4, 12)  # limit
-    for k in range(5, len(cols) + 1):
-        _set_width(ws, k, min(26, max(10, len(str(cols[k - 1])) + 2)))
-
-    # formats
-    for r in range(2, ws.max_row + 1):
-        ws.cell(row=r, column=4).number_format = "0.000"  # limit
-    for col_idx in range(5, len(cols) + 1):
-        for r in range(2, ws.max_row + 1):
-            ws.cell(row=r, column=col_idx).number_format = "0.000"  # percent
-
-    # optional styling
-    if apply_table_styles is not None:
-        try:
-            apply_table_styles(ws)
-        except Exception:
-            pass
-
-
-def _safe_unique_sheet_name(wb: Workbook, desired: str) -> str:
-    """
-    Excel rules:
-      - max 31 chars
-      - cannot contain: : \ / ? * [ ]
-      - must be unique
-    """
-    name = (desired or "Sheet").strip()
-    for ch in [":", "\\", "/", "?", "*", "[", "]"]:
-        name = name.replace(ch, " ")
-    name = " ".join(name.split())  # collapse whitespace
-    name = name[:31]
-
-    if name not in wb.sheetnames:
-        return name
-
-    # suffix with (2), (3)...
-    for n in range(2, 999):
-        suffix = f" ({n})"
-        base = name[: 31 - len(suffix)]
-        cand = (base + suffix)[:31]
-        if cand not in wb.sheetnames:
-            return cand
-
-    return (name[:28] + "_dup")[:31]
-
-
-def _write_df_basic(ws, df: pd.DataFrame) -> None:
-    # minimal fallback writer
-    for j, c in enumerate(df.columns, start=1):
-        cell = ws.cell(row=1, column=j, value=c)
-        cell.font = cell.font.copy(bold=True)
-    for i, row in enumerate(df.itertuples(index=False), start=2):
-        for j, v in enumerate(row, start=1):
-            ws.cell(row=i, column=j, value=_excel_safe(v))
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(df.shape[1])}{ws.max_row}"
-
-
-def _fmt_delta(v) -> Optional[str]:
-    if pd.isna(v):
-        return None
-    try:
-        v = float(v)
-    except Exception:
-        return None
-    sign = "+" if v > 0 else ""
-    return f"{sign}{v:.3f}"
-
-
-def _case_type_rank(ct: Optional[str]) -> int:
-    if ct is None:
-        return 999
-    ct = str(ct).strip()
-    try:
-        return CASE_TYPES_CANONICAL.index(ct)
-    except ValueError:
-        return 999
-
-
-def _excel_safe(v):
-    if pd.isna(v):
-        return None
-    try:
-        import numpy as np
-        if isinstance(v, np.generic):
-            return v.item()
-    except Exception:
-        pass
-    return v
-
-
-def _set_width(ws, col_idx: int, width: float) -> None:
-    ws.column_dimensions[get_column_letter(col_idx)].width = float(width)
