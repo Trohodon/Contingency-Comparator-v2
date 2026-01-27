@@ -25,7 +25,7 @@ try:
 except ImportError:
     OPENPYXL_AVAILABLE = False
 
-from core.batch_sheet_writer import write_formatted_pair_sheet
+from core.batch_sheet_writer import write_formatted_pair_sheet, write_straight_comparison_sheet
 
 
 # Mapping from the pretty case-type titles in the formatted sheet
@@ -356,6 +356,79 @@ def build_pair_comparison_df(
     return df_all
 
 
+# ---------------------------------------------------------------------------
+# Straight comparison (all original sheets together)
+# ---------------------------------------------------------------------------
+
+def build_straight_comparison_df(
+    workbook_path: str,
+    sheet_names: Sequence[str],
+    threshold: float = 0.0,
+    log_func=None,
+) -> pd.DataFrame:
+    """
+    Compare ALL selected/original sheets side-by-side.
+
+    Output columns:
+      Category, Limit, Contingency Events, Resulting Issue, <one column per sheet>
+
+    A row is kept if *any* sheet's percent is >= threshold.
+    """
+    if not sheet_names:
+        return pd.DataFrame(columns=["Category", "Limit", "Contingency Events", "Resulting Issue"])
+
+    key_cols = ["CaseType", "CTGLabel", "LimViolID"]
+    pct_dfs = {}
+    val_dfs = {}
+
+    for sn in sheet_names:
+        df = _load_sheet_as_df(workbook_path, sn, log_func=log_func)
+        if df.empty:
+            pct_dfs[sn] = pd.DataFrame(columns=key_cols + ["LimViolPct"])
+            val_dfs[sn] = pd.DataFrame(columns=key_cols + ["LimViolValue"])
+        else:
+            pct_dfs[sn] = df.groupby(key_cols, as_index=False)["LimViolPct"].max()
+            val_dfs[sn] = df.groupby(key_cols, as_index=False)["LimViolValue"].max()
+
+    all_keys = pd.concat([d[key_cols] for d in pct_dfs.values()], ignore_index=True).drop_duplicates()
+    if all_keys.empty:
+        return pd.DataFrame(columns=["Category", "Limit", "Contingency Events", "Resulting Issue"])
+
+    base = all_keys.copy()
+
+    for sn, df_pct in pct_dfs.items():
+        base = pd.merge(base, df_pct.rename(columns={"LimViolPct": sn}), on=key_cols, how="left")
+
+    limit_cols = []
+    for sn, df_val in val_dfs.items():
+        col = f"_Limit_{sn}"
+        base = pd.merge(base, df_val.rename(columns={"LimViolValue": col}), on=key_cols, how="left")
+        limit_cols.append(col)
+
+    base["Limit"] = base[limit_cols].max(axis=1, skipna=True) if limit_cols else math.nan
+    if limit_cols:
+        base = base.drop(columns=limit_cols)
+
+    pct_cols = list(sheet_names)
+    if pct_cols:
+        row_max = base[pct_cols].max(axis=1, skipna=True)
+        base = base[row_max.notna() & (row_max >= float(threshold))].copy()
+
+    def _pretty_case(x: str) -> str:
+        return CANONICAL_TO_PRETTY.get(x, x)
+
+    base["Category"] = base["CaseType"].apply(lambda v: _pretty_case(str(v)))
+    base = base.rename(columns={"CTGLabel": "Contingency Events", "LimViolID": "Resulting Issue"})
+
+    if pct_cols:
+        base["_Sort"] = base[pct_cols].max(axis=1, skipna=True)
+        base = base.sort_values(by="_Sort", ascending=False, na_position="last").drop(columns=["_Sort"])
+
+    cols = ["Category", "Limit", "Contingency Events", "Resulting Issue"] + pct_cols
+    cols = [c for c in cols if c in base.columns]
+    return base[cols].reset_index(drop=True)
+
+
 def _sanitize_sheet_name(name: str) -> str:
     invalid = set(r'[]:*?/\\')
     cleaned = "".join(ch if ch not in invalid else "_" for ch in name)
@@ -377,20 +450,20 @@ def build_batch_comparison_workbook(
     **kwargs,
 ) -> str:
     """
-    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair.
+    Build a brand-new .xlsx workbook with one sheet per (left_sheet, right_sheet) pair
+    PLUS a final "Straight Comparison" tab that compares all original sheets together.
 
     Keyword compatibility:
       - GUI may call this using src_workbook=...
       - or workbook_path=...
       - or older names; we gracefully accept them via **kwargs.
 
-    If expandable_issue_view=True, each sheet uses Excel +/- grouping by Resulting Issue.
+    If expandable_issue_view=True, each pair sheet uses Excel +/- grouping by Resulting Issue.
     """
     if not OPENPYXL_AVAILABLE:
         raise RuntimeError("openpyxl is required to build the batch workbook.")
 
     # Backward/forward compatibility for callers:
-    # Accept src_workbook, workbook_path, or fall back to kwargs.
     if src_workbook is None:
         src_workbook = workbook_path
     if src_workbook is None:
@@ -439,7 +512,7 @@ def build_batch_comparison_workbook(
                 ]
             )
 
-        # NEW: no numbering, and use " vs " instead of "_vs_"
+        # No numbering, and use " vs " instead of "_vs_"
         base_name = f"{left_sheet} vs {right_sheet}"
         base_name = _sanitize_sheet_name(base_name)
 
@@ -458,6 +531,41 @@ def build_batch_comparison_workbook(
             df_pair,
             expandable_issue_view=expandable_issue_view,
         )
+
+    # -------------------------------------------------------------------
+    # Always add a final "Straight Comparison" sheet (all originals together)
+    # -------------------------------------------------------------------
+    originals = []
+    for (ls, rs) in pairs:
+        originals.append(ls)
+        originals.append(rs)
+
+    # preserve workbook order (if possible) for readability
+    try:
+        src_wb = load_workbook(src_workbook, read_only=True, data_only=True)
+        order = [sn for sn in src_wb.sheetnames if sn in set(originals)]
+        if not order:
+            order = list(dict.fromkeys(originals))
+    except Exception:
+        order = list(dict.fromkeys(originals))
+
+    df_straight = build_straight_comparison_df(
+        src_workbook,
+        sheet_names=order,
+        threshold=threshold,
+        log_func=log_func,
+    )
+
+    straight_name_base = _sanitize_sheet_name("Straight Comparison")
+    straight_name = straight_name_base
+    counter = 2
+    while straight_name in used_names:
+        suffix = f" ({counter})"
+        straight_name = _sanitize_sheet_name(straight_name_base[: (31 - len(suffix))] + suffix)
+        counter += 1
+    used_names.add(straight_name)
+
+    write_straight_comparison_sheet(wb, straight_name, df_straight)
 
     wb.save(output_path)
 
