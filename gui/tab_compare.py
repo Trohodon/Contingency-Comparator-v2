@@ -19,24 +19,10 @@ class CompareTab(ttk.Frame):
     """
     Split-screen-style comparison tab.
 
-    - Open any Combined_ViolationCTG_Comparison.xlsx (or compatible workbook)
-    - Choose left/right sheets
-    - Set a percent-loading threshold (default 80%)
-    - Live view: for each case type (ACCA LongTerm, ACCA, DCwAC) show rows sorted
-      highest-to-lowest by loading, with:
-         Left %, Right %, Δ% (or 'Only in left/right' when unmatched)
-    - Build queue:
-         * "Add to queue": add current Left vs Right pair
-         * "Delete selected": remove pair from queue
-         * "Clear all": remove all queued pairs
-         * "Build queued workbook": write a new .xlsx containing one sheet per pair
-
-    NEW:
-      - "Expandable issue view (+/-) in batch workbook": groups rows per Resulting Issue.
-
-    IMPORTANT (UI responsiveness):
-      - Batch workbook build runs in a background thread so the UI won't go "Not Responding".
-      - Logging is thread-safe and marshaled to the Tk UI thread when needed.
+    NEW behavior:
+      - "Build queued workbook" now supports empty queue:
+        if no pairs are queued, user can still build a workbook that contains ONLY
+        the "Straight Comparison" sheet (all original scenario sheets).
     """
 
     CASE_TYPE_TABS = [
@@ -52,10 +38,7 @@ class CompareTab(ttk.Frame):
         self.left_sheet_var = tk.StringVar()
         self.right_sheet_var = tk.StringVar()
 
-        # Percent loading threshold
         self.threshold_var = tk.StringVar(value="80")
-
-        # NEW: expandable issue view for batch build workbook
         self.expandable_batch_var = tk.BooleanVar(value=True)
 
         self._sheets: List[str] = []
@@ -64,10 +47,8 @@ class CompareTab(ttk.Frame):
         self.local_log: Optional[tk.Text] = None
         self.external_log_func = None
 
-        # One Treeview per canonical case type
         self._trees: dict[str, ttk.Treeview] = {}
 
-        # Queue of (left_sheet, right_sheet) pairs
         self._queue: List[Tuple[str, str]] = []
         self._queue_listbox: Optional[tk.Listbox] = None
 
@@ -76,11 +57,9 @@ class CompareTab(ttk.Frame):
     # ---------------- Thread-safe UI helpers ---------------- #
 
     def _ui(self, func, *args, **kwargs):
-        """Run func on Tk UI thread."""
         self.after(0, lambda: func(*args, **kwargs))
 
     def _set_cursor_busy(self, busy: bool):
-        """Show a busy cursor while doing long work."""
         try:
             cursor = "watch" if busy else ""
             self.winfo_toplevel().configure(cursor=cursor)
@@ -97,11 +76,9 @@ class CompareTab(ttk.Frame):
             try:
                 self.external_log_func(msg)
             except Exception:
-                # external log should never crash the UI
                 pass
 
     def log(self, msg: str):
-        # If we're on a background thread, marshal to UI thread.
         if threading.current_thread() is threading.main_thread():
             self._log_ui(msg)
         else:
@@ -118,14 +95,11 @@ class CompareTab(ttk.Frame):
         self.clear_all_btn.configure(state=state)
 
         self._set_cursor_busy(running)
-
-        # Let Tk paint immediately
         self.update_idletasks()
 
     # ---------------- GUI layout ---------------- #
 
     def _build_gui(self):
-        # Top: workbook selection
         wb_frame = ttk.Frame(self)
         wb_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
 
@@ -146,7 +120,6 @@ class CompareTab(ttk.Frame):
             row=0, column=4, sticky="w"
         )
 
-        # NEW checkbox
         ttk.Checkbutton(
             wb_frame,
             text="Expandable issue view (+/-) in batch workbook",
@@ -155,7 +128,6 @@ class CompareTab(ttk.Frame):
 
         wb_frame.columnconfigure(2, weight=1)
 
-        # Comparison controls + build queue
         cmp_frame = ttk.LabelFrame(self, text="Comparison")
         cmp_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 8))
 
@@ -215,7 +187,6 @@ class CompareTab(ttk.Frame):
         cmp_frame.columnconfigure(1, weight=1)
         cmp_frame.columnconfigure(3, weight=1)
 
-        # Notebook for live view
         nb = ttk.Notebook(self)
         nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=(0, 8))
 
@@ -307,13 +278,66 @@ class CompareTab(ttk.Frame):
 
         self.log(f"Cleared queue ({count} item{'s' if count != 1 else ''}).")
 
+    # ---------------- NEW: queue prompt allowing straight-only ---------------- #
+
+    def _prompt_build_when_queue_empty(self) -> bool:
+        """
+        Returns True if user wants to continue building (Straight Comparison only),
+        False if they cancel.
+        """
+        top = tk.Toplevel(self)
+        top.title("Build workbook")
+        top.transient(self.winfo_toplevel())
+        top.grab_set()
+
+        frm = ttk.Frame(top, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            frm,
+            text="No batch comparisons are queued.",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w")
+
+        ttk.Label(
+            frm,
+            text="You can still build a workbook that contains ONLY the Straight Comparison\n"
+                 "(all original scenario sheets from the source workbook).",
+        ).pack(anchor="w", pady=(6, 10))
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill=tk.X, pady=(6, 0))
+
+        choice = {"ok": False}
+
+        def do_continue():
+            choice["ok"] = True
+            top.destroy()
+
+        def do_cancel():
+            choice["ok"] = False
+            top.destroy()
+
+        ttk.Button(btns, text="Cancel", command=do_cancel).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(btns, text="Continue (Straight Comparison only)", command=do_continue).pack(
+            side=tk.RIGHT
+        )
+
+        # Center-ish
+        top.update_idletasks()
+        try:
+            x = self.winfo_toplevel().winfo_rootx() + 80
+            y = self.winfo_toplevel().winfo_rooty() + 80
+            top.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        self.wait_window(top)
+        return bool(choice["ok"])
+
     def build_queued_workbook(self):
         if self._is_running:
             messagebox.showinfo("Busy", "Another operation is running. Please wait.")
-            return
-
-        if not self._queue:
-            messagebox.showinfo("Empty queue", "No comparisons in the build queue.")
             return
 
         wb = self.workbook_path.get()
@@ -321,32 +345,43 @@ class CompareTab(ttk.Frame):
             messagebox.showwarning("No workbook", "Please load a valid .xlsx workbook first.")
             return
 
+        # NEW: allow empty queue -> user can still proceed with straight-only
+        if not self._queue:
+            proceed = self._prompt_build_when_queue_empty()
+            if not proceed:
+                return
+
         try:
             thr_raw = self.threshold_var.get().strip()
             threshold = float(thr_raw) if thr_raw else 0.0
             if threshold < 0:
                 threshold = 0.0
         except ValueError:
-            messagebox.showwarning("Invalid threshold", "Percent loading threshold must be a number (e.g. 80).")
+            messagebox.showwarning(
+                "Invalid threshold",
+                "Percent loading threshold must be a number (e.g. 80)."
+            )
             return
 
         initial_dir = os.path.dirname(wb) if os.path.dirname(wb) else "."
         save_path = filedialog.asksaveasfilename(
-            title="Save batch comparison workbook",
+            title="Save comparison workbook",
             defaultextension=".xlsx",
             initialdir=initial_dir,
-            initialfile="Batch_Comparison.xlsx",
+            initialfile="Comparison.xlsx" if self._queue else "Straight_Comparison.xlsx",
             filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
         )
         if not save_path:
             return
 
-        # Snapshot queue so changes during build don't affect the worker
-        pairs_snapshot = list(self._queue)
+        pairs_snapshot = list(self._queue)  # may be empty
         expandable = self.expandable_batch_var.get()
 
         self._set_running(True)
-        self.log("Building queued workbook...")
+        if pairs_snapshot:
+            self.log("Building queued workbook...")
+        else:
+            self.log("Building Straight Comparison workbook (no queued pairs)...")
 
         def worker():
             ok = False
@@ -354,10 +389,10 @@ class CompareTab(ttk.Frame):
             try:
                 build_batch_comparison_workbook(
                     src_workbook=wb,
-                    pairs=pairs_snapshot,
+                    pairs=pairs_snapshot,                 # may be []
                     threshold=threshold,
                     output_path=save_path,
-                    log_func=self.log,  # thread-safe
+                    log_func=self.log,
                     expandable_issue_view=expandable,
                 )
                 ok = True
@@ -367,11 +402,11 @@ class CompareTab(ttk.Frame):
             def finish_on_ui():
                 self._set_running(False)
                 if ok:
-                    self.log(f"Batch comparison workbook created at:\n{save_path}")
-                    messagebox.showinfo("Batch workbook created", f"Batch comparison workbook created at:\n{save_path}")
+                    self.log(f"Workbook created at:\n{save_path}")
+                    messagebox.showinfo("Workbook created", f"Workbook created at:\n{save_path}")
                 else:
                     messagebox.showerror("Error", f"Failed to build workbook:\n{err_msg}")
-                    self.log(f"ERROR building batch workbook: {err_msg}")
+                    self.log(f"ERROR building workbook: {err_msg}")
 
             self._ui(finish_on_ui)
 
