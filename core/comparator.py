@@ -1,141 +1,256 @@
-# core/comparator.py
-#
-# Helpers for working with the formatted
-# Combined_ViolationCTG_Comparison.xlsx workbook and for building
-# batch comparison workbooks in a nicely formatted style.
-#
-# Public functions used by the GUI:
-#   - list_sheets(workbook_path)
-#   - build_case_type_comparison(... )
-#   - build_pair_comparison_df(... )
-#   - build_batch_comparison_workbook(... )
-#
-# UPDATED:
-#   - build_batch_comparison_workbook now allows pairs=[] so users can build a
-#     workbook containing ONLY the "Straight Comparison" sheet (all originals).
+"""core/comparator.py
+
+Parses the Combined_ViolationCTG_Comparison.xlsx workbook produced by the
+contingency builder and generates:
+  - Live view comparisons (DataFrame) for a single case type
+  - Batch comparison workbook (many left/right pairs)
+
+UPDATE (Limit column support):
+  The source scenario sheets may be in either of these layouts:
+    Old layout (5 cols):
+      B Contingency Events | C Resulting Issue | D Contingency Value (MVA) | E Percent Loading
+    New layout (6 cols):
+      B Contingency Events | C Resulting Issue | D Limit | E Contingency Value (MVA) | F Percent Loading
+
+  This module now detects header columns dynamically and carries LimViolLimit
+  through comparisons so pair/batch sheets can show the Limit.
+"""
 
 from __future__ import annotations
 
-from typing import List, Dict, Optional, Sequence, Tuple
-
 import math
 import os
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
 import pandas as pd
 
 try:
     from openpyxl import load_workbook, Workbook
+
     OPENPYXL_AVAILABLE = True
-except ImportError:
+except Exception:
     OPENPYXL_AVAILABLE = False
 
-from core.batch_sheet_writer import write_formatted_pair_sheet
-from core.straight_comparison import build_straight_comparison_df, write_formatted_straight_sheet
+
+# ----------------------------- helpers ----------------------------- #
 
 
-CANONICAL_CASE_TYPES = {
-    "ACCA LongTerm": "ACCA_LongTerm",
-    "ACCA Long Term": "ACCA_LongTerm",
-    "ACCA": "ACCA_P1,2,4,7",
-    "DCwAC": "DCwACver_P1-7",
-}
+def _norm_header(x) -> str:
+    if x is None:
+        return ""
+    return str(x).strip().lower().replace("\n", " ")
 
-CASE_TYPES_CANONICAL: List[str] = [
-    "ACCA_LongTerm",
-    "ACCA_P1,2,4,7",
-    "DCwACver_P1-7",
-]
 
-CANONICAL_TO_PRETTY = {
-    "ACCA_LongTerm": "ACCA LongTerm",
-    "ACCA_P1,2,4,7": "ACCA",
-    "DCwACver_P1-7": "DCwAC",
-}
+def _detect_columns(ws, header_row: int) -> Dict[str, int]:
+    """Return mapping of semantic column -> 1-based column index.
+
+    We inspect header cells from B..H (2..8) and try to find:
+      - ctg (contingency events / ctglabel)
+      - issue (resulting issue / limviolid)
+      - limit (limit)
+      - value (contingency value / mva / value)
+      - pct (percent loading / pct)
+    """
+    cols = {}
+    for col_idx in range(2, 9):  # B..H
+        v = ws.cell(row=header_row, column=col_idx).value
+        h = _norm_header(v)
+        if not h:
+            continue
+
+        if ("contingency" in h and "value" not in h) or "ctglabel" in h:
+            cols["ctg"] = col_idx
+            continue
+
+        if "resulting issue" in h or "limviolid" in h or (("issue" in h) and ("resulting" in h)):
+            cols["issue"] = col_idx
+            continue
+
+        # Limit column: avoid matching "value"
+        if "limit" in h and "value" not in h:
+            cols["limit"] = col_idx
+            continue
+
+        if "mva" in h or ("contingency value" in h) or (h == "value") or ("limviolvalue" in h):
+            cols["value"] = col_idx
+            continue
+
+        if "percent" in h or "loading" in h or "pct" in h or "limviolpct" in h:
+            cols["pct"] = col_idx
+            continue
+
+    return cols
+
+
+def _to_float(x) -> float:
+    if x is None:
+        return float("nan")
+    if isinstance(x, (int, float)):
+        try:
+            return float(x)
+        except Exception:
+            return float("nan")
+    s = str(x).strip().replace("%", "")
+    try:
+        return float(s)
+    except Exception:
+        return float("nan")
+
+
+def _is_nan(x) -> bool:
+    return isinstance(x, float) and math.isnan(x)
+
+
+def _choose_limit(left, right) -> str:
+    """Choose a single display value for Limit.
+
+    If both exist and match -> show one.
+    If both exist and differ -> show "L:<left> | R:<right>".
+    Else show whichever exists.
+    """
+    l = "" if left is None else str(left).strip()
+    r = "" if right is None else str(right).strip()
+
+    if l and r:
+        # try numeric compare (many are numbers)
+        lf = _to_float(l)
+        rf = _to_float(r)
+        if not _is_nan(lf) and not _is_nan(rf):
+            if abs(lf - rf) < 1e-9:
+                return f"{lf:g}"
+            return f"L:{lf:g} | R:{rf:g}"
+        if l == r:
+            return l
+        return f"L:{l} | R:{r}"
+
+    return l or r or ""
+
+
+# ----------------------------- public API ----------------------------- #
 
 
 def list_sheets(workbook_path: str) -> List[str]:
     if not OPENPYXL_AVAILABLE:
-        raise RuntimeError("openpyxl is required for sheet listing and comparison.")
-    if not os.path.isfile(workbook_path):
-        raise FileNotFoundError(f"Workbook not found: {workbook_path}")
-    wb = load_workbook(workbook_path, read_only=True, data_only=True)
-    return list(wb.sheetnames)
+        raise RuntimeError("openpyxl is required to read Excel workbooks in this build.")
+    wb = load_workbook(workbook_path, data_only=True, read_only=True)
+    try:
+        return list(wb.sheetnames)
+    finally:
+        wb.close()
 
 
-def _is_blank(v) -> bool:
-    if v is None:
-        return True
-    if isinstance(v, str) and v.strip() == "":
-        return True
-    return False
+def _parse_scenario_sheet(
+    workbook_path: str, sheet_name: str, log_func: Optional[Callable[[str], None]] = None
+) -> pd.DataFrame:
+    """Parse one scenario sheet into a normalized DataFrame.
 
-
-def _parse_scenario_sheet(ws, log_func=None) -> pd.DataFrame:
-    records: List[Dict] = []
-
-    max_row = ws.max_row or 1
-    row_idx = 1
-
-    while row_idx <= max_row:
-        title_cell = ws.cell(row=row_idx, column=2)
-        title_val = title_cell.value
-
-        if isinstance(title_val, str) and title_val.strip():
-            pretty_name = title_val.strip()
-            case_type = CANONICAL_CASE_TYPES.get(pretty_name, pretty_name)
-
-            header_row = row_idx + 1
-            data_row = header_row + 1
-
-            last_issue = None
-
-            r = data_row
-            while r <= max_row:
-                b = ws.cell(row=r, column=2).value
-                c = ws.cell(row=r, column=3).value
-                d = ws.cell(row=r, column=4).value
-                e = ws.cell(row=r, column=5).value
-
-                if _is_blank(b) and _is_blank(c) and _is_blank(d) and _is_blank(e):
-                    break
-
-                if _is_blank(c) and last_issue is not None:
-                    c = last_issue
-                else:
-                    if not _is_blank(c):
-                        last_issue = c
-
-                records.append(
-                    {
-                        "CaseType": case_type,
-                        "CTGLabel": b,
-                        "LimViolID": c,
-                        "LimViolValue": d,
-                        "LimViolPct": e,
-                    }
-                )
-                r += 1
-
-            row_idx = r + 1
-        else:
-            row_idx += 1
-
-    df = pd.DataFrame.from_records(records)
-    if log_func:
-        log_func(
-            f"Parsed {len(df)} rows from sheet '{ws.title}'. "
-            f"Columns: {list(df.columns)}"
-        )
-    return df
-
-
-def _load_sheet_as_df(workbook_path: str, sheet_name: str, log_func=None) -> pd.DataFrame:
+    Output columns:
+      - CaseType (e.g., ACCA_LongTerm)
+      - CTGLabel
+      - LimViolID
+      - LimViolLimit (may be blank if not present in source)
+      - LimViolValue (may be blank if not present in source)
+      - LimViolPct (string or numeric, as encountered)
+    """
     if not OPENPYXL_AVAILABLE:
-        raise RuntimeError("openpyxl is required for comparison.")
-    wb = load_workbook(workbook_path, data_only=True)
-    if sheet_name not in wb.sheetnames:
-        raise ValueError(f"Sheet '{sheet_name}' not found in workbook.")
-    ws = wb[sheet_name]
-    return _parse_scenario_sheet(ws, log_func=log_func)
+        raise RuntimeError("openpyxl is required to parse Excel workbooks in this build.")
+
+    wb = load_workbook(workbook_path, data_only=True, read_only=True)
+    try:
+        if sheet_name not in wb.sheetnames:
+            raise ValueError(f"Sheet not found: {sheet_name}")
+
+        ws = wb[sheet_name]
+
+        rows = []
+        r = 1
+        max_r = ws.max_row or 1
+
+        while r <= max_r:
+            cell_b = ws.cell(row=r, column=2).value  # B
+            # Title rows are the case type names (single merged cell in B..F/G)
+            title = str(cell_b).strip() if cell_b is not None else ""
+            if title in ("ACCA LongTerm", "ACCA", "DCwAC"):
+                # header row is next
+                header_row = r + 1
+                colmap = _detect_columns(ws, header_row)
+
+                # Fallback for old layout if detection fails
+                ctg_col = colmap.get("ctg", 2)
+                issue_col = colmap.get("issue", 3)
+                limit_col = colmap.get("limit")  # may be None
+                value_col = colmap.get("value")
+                pct_col = colmap.get("pct")
+
+                # Old layout fallback: D=value, E=pct
+                if value_col is None and pct_col is None:
+                    value_col = 4
+                    pct_col = 5
+
+                # New layout fallback: D=limit, E=value, F=pct (common)
+                if pct_col is None and value_col is not None and value_col == 5:
+                    pct_col = 6
+
+                # Start reading data after header row
+                r = header_row + 1
+
+                # Canonicalize title -> CaseType
+                case_type = {
+                    "ACCA LongTerm": "ACCA_LongTerm",
+                    "ACCA": "ACCA_P1,2,4,7",
+                    "DCwAC": "DCwACver_P1-7",
+                }.get(title, title)
+
+                while r <= max_r:
+                    ctg = ws.cell(row=r, column=ctg_col).value
+                    issue = ws.cell(row=r, column=issue_col).value
+
+                    # stop on blank lines
+                    if (ctg is None or str(ctg).strip() == "") and (issue is None or str(issue).strip() == ""):
+                        break
+
+                    lim = ws.cell(row=r, column=limit_col).value if limit_col else None
+                    val = ws.cell(row=r, column=value_col).value if value_col else None
+                    pct = ws.cell(row=r, column=pct_col).value if pct_col else None
+
+                    issue_str = str(issue).strip() if issue is not None else ""
+                    limviol_id = issue_str
+
+                    rows.append(
+                        {
+                            "CaseType": case_type,
+                            "CTGLabel": "" if ctg is None else str(ctg).strip(),
+                            "LimViolID": limviol_id,
+                            "LimViolLimit": "" if lim is None else lim,
+                            "LimViolValue": "" if val is None else val,
+                            "LimViolPct": "" if pct is None else pct,
+                        }
+                    )
+                    r += 1
+
+                # skip any blank separator rows after a block
+                r += 1
+                continue
+
+            r += 1
+
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+
+        # Forward-fill within each case type where LimViolID is blank (detail rows)
+        df["LimViolID"] = df["LimViolID"].replace("", pd.NA)
+        df["LimViolID"] = df.groupby("CaseType")["LimViolID"].ffill()
+        df["LimViolID"] = df["LimViolID"].fillna("")
+
+        # Clean whitespace
+        df["CTGLabel"] = df["CTGLabel"].astype(str).str.strip()
+        df["LimViolID"] = df["LimViolID"].astype(str).str.strip()
+
+        return df
+
+    finally:
+        wb.close()
 
 
 def build_case_type_comparison(
@@ -144,55 +259,73 @@ def build_case_type_comparison(
     new_sheet: str,
     case_type: str,
     max_rows: Optional[int] = None,
-    log_func=None,
+    log_func: Optional[Callable[[str], None]] = None,
 ) -> pd.DataFrame:
-    if case_type not in CASE_TYPES_CANONICAL:
-        raise ValueError(f"Unknown case type: {case_type}")
+    """Return a DataFrame comparing a single case type between two sheets.
 
-    base_df = _load_sheet_as_df(workbook_path, base_sheet, log_func=log_func)
-    new_df = _load_sheet_as_df(workbook_path, new_sheet, log_func=log_func)
+    Output columns:
+      Contingency, ResultingIssue, Limit, LeftPct, RightPct, DeltaPct
+    """
+    base_df = _parse_scenario_sheet(workbook_path, base_sheet, log_func)
+    new_df = _parse_scenario_sheet(workbook_path, new_sheet, log_func)
 
     base_df = base_df[base_df["CaseType"] == case_type].copy()
     new_df = new_df[new_df["CaseType"] == case_type].copy()
 
-    if log_func:
-        log_func(f"  [{case_type}] base rows={len(base_df)}, new rows={len(new_df)}")
-
-    if base_df.empty and new_df.empty:
-        return pd.DataFrame(columns=["Contingency", "ResultingIssue", "LeftPct", "RightPct", "DeltaPct"])
-
-    base_df = base_df.rename(columns={"LimViolPct": "Left_Pct"})
-    new_df = new_df.rename(columns={"LimViolPct": "Right_Pct"})
-
+    # Keys
     key_cols = ["CTGLabel", "LimViolID"]
-    left_cols = key_cols + ["Left_Pct"]
-    right_cols = key_cols + ["Right_Pct"]
 
-    merged = pd.merge(base_df[left_cols], new_df[right_cols], on=key_cols, how="outer")
-    merged["Delta_Pct"] = merged["Right_Pct"] - merged["Left_Pct"]
+    # Convert pct to float for comparisons
+    base_df["_pct_num"] = base_df["LimViolPct"].apply(_to_float)
+    new_df["_pct_num"] = new_df["LimViolPct"].apply(_to_float)
 
-    result = merged.rename(
-        columns={
-            "CTGLabel": "Contingency",
-            "LimViolID": "ResultingIssue",
-            "Left_Pct": "LeftPct",
-            "Right_Pct": "RightPct",
-            "Delta_Pct": "DeltaPct",
-        }
+    # Keep worst per (CTGLabel, LimViolID)
+    base_df = (
+        base_df.sort_values(by=key_cols + ["_pct_num"], ascending=[True, True, False], kind="mergesort")
+        .drop_duplicates(subset=key_cols, keep="first")
+    )
+    new_df = (
+        new_df.sort_values(by=key_cols + ["_pct_num"], ascending=[True, True, False], kind="mergesort")
+        .drop_duplicates(subset=key_cols, keep="first")
     )
 
-    sort_series = result["RightPct"]
-    result["_SortPct"] = sort_series if sort_series.notna().any() else result["LeftPct"]
-    result = result.sort_values(by="_SortPct", ascending=False, na_position="last").drop(columns=["_SortPct"])
+    base_df = base_df.rename(columns={"_pct_num": "LeftPct", "LimViolLimit": "LeftLimit"})
+    new_df = new_df.rename(columns={"_pct_num": "RightPct", "LimViolLimit": "RightLimit"})
+
+    merged = pd.merge(
+        base_df[key_cols + ["LeftPct", "LeftLimit"]],
+        new_df[key_cols + ["RightPct", "RightLimit"]],
+        on=key_cols,
+        how="outer",
+    )
+
+    # Display columns
+    merged["Contingency"] = merged["CTGLabel"].fillna("").astype(str)
+    merged["ResultingIssue"] = merged["LimViolID"].fillna("").astype(str)
+    merged["Limit"] = merged.apply(lambda r: _choose_limit(r.get("LeftLimit"), r.get("RightLimit")), axis=1)
+
+    def _delta(row):
+        l = row.get("LeftPct", float("nan"))
+        r = row.get("RightPct", float("nan"))
+        if _is_nan(l) or _is_nan(r):
+            return float("nan")
+        return r - l
+
+    merged["DeltaPct"] = merged.apply(_delta, axis=1)
+
+    # Sort by worst max pct
+    merged["_max"] = merged.apply(
+        lambda r: max([x for x in [r.get("LeftPct"), r.get("RightPct")] if not _is_nan(x)] or [float("nan")]), axis=1
+    )
+    merged = merged.sort_values(by=["_max", "Contingency", "ResultingIssue"], ascending=[False, True, True], na_position="last")
+    merged = merged.drop(columns=["_max"])
+
+    out = merged[["Contingency", "ResultingIssue", "Limit", "LeftPct", "RightPct", "DeltaPct"]].copy()
 
     if max_rows is not None and max_rows > 0:
-        result = result.head(max_rows)
+        out = out.head(int(max_rows))
 
-    return result
-
-
-def _is_nan(x) -> bool:
-    return isinstance(x, float) and math.isnan(x)
+    return out
 
 
 def build_pair_comparison_df(
@@ -200,12 +333,15 @@ def build_pair_comparison_df(
     left_sheet: str,
     right_sheet: str,
     threshold: float,
-    log_func=None,
+    log_func: Optional[Callable[[str], None]] = None,
 ) -> pd.DataFrame:
-    records: List[Dict] = []
+    """Build the DataFrame used for a formatted pair sheet.
 
-    for case_type in CASE_TYPES_CANONICAL:
-        pretty = CANONICAL_TO_PRETTY.get(case_type, case_type)
+    Output columns:
+      CaseType, Contingency, ResultingIssue, Limit, LeftPct, RightPct, DeltaDisplay
+    """
+    records = []
+    for case_type in ("ACCA_LongTerm", "ACCA_P1,2,4,7", "DCwACver_P1-7"):
         df = build_case_type_comparison(
             workbook_path,
             base_sheet=left_sheet,
@@ -218,209 +354,91 @@ def build_pair_comparison_df(
             continue
 
         for _, row in df.iterrows():
-            cont = str(row.get("Contingency", "") or "")
-            issue = "" if row.get("ResultingIssue", None) is None else str(row.get("ResultingIssue"))
-            left_pct = row.get("LeftPct", math.nan)
-            right_pct = row.get("RightPct", math.nan)
-            delta_pct = row.get("DeltaPct", math.nan)
-
-            values = []
-            if not _is_nan(left_pct):
-                values.append(float(left_pct))
-            if not _is_nan(right_pct):
-                values.append(float(right_pct))
-            if not values or max(values) < threshold:
+            left_pct = row.get("LeftPct", float("nan"))
+            right_pct = row.get("RightPct", float("nan"))
+            vals = [v for v in [left_pct, right_pct] if not _is_nan(v)]
+            if not vals:
+                continue
+            if max(vals) < threshold:
                 continue
 
             if _is_nan(left_pct) and not _is_nan(right_pct):
-                delta_text = "Only in right"
+                delta_display = "Only in right"
             elif not _is_nan(left_pct) and _is_nan(right_pct):
-                delta_text = "Only in left"
-            elif _is_nan(left_pct) and _is_nan(right_pct):
-                delta_text = ""
+                delta_display = "Only in left"
+            elif not _is_nan(left_pct) and not _is_nan(right_pct):
+                delta_display = f"{(right_pct - left_pct):.2f}"
             else:
-                delta_text = f"{float(delta_pct):.2f}" if not _is_nan(delta_pct) else ""
+                delta_display = ""
 
             records.append(
                 {
-                    "CaseType": pretty,
-                    "Contingency": cont,
-                    "ResultingIssue": issue,
-                    "LeftPct": float(left_pct) if not _is_nan(left_pct) else None,
-                    "RightPct": float(right_pct) if not _is_nan(right_pct) else None,
-                    "DeltaDisplay": delta_text,
+                    "CaseType": case_type,
+                    "Contingency": row.get("Contingency", ""),
+                    "ResultingIssue": row.get("ResultingIssue", ""),
+                    "Limit": row.get("Limit", ""),
+                    "LeftPct": left_pct,
+                    "RightPct": right_pct,
+                    "DeltaDisplay": delta_display,
                 }
             )
 
-    df_all = pd.DataFrame.from_records(records)
-    if not df_all.empty:
-        sort_vals = df_all[["LeftPct", "RightPct"]].max(axis=1)
-        df_all["_SortKey"] = sort_vals
-        df_all = df_all.sort_values(
-            by=["CaseType", "_SortKey"],
-            ascending=[True, False],
-            na_position="last",
-        ).drop(columns=["_SortKey"])
-    return df_all
-
-
-def _sanitize_sheet_name(name: str) -> str:
-    invalid = set(r'[]:*?/\\')
-    cleaned = "".join(ch if ch not in invalid else "_" for ch in name).strip()
-    return (cleaned or "Sheet")[:31]
-
-
-def _looks_like_output_sheet(name: str) -> bool:
-    """
-    Filter out sheets that are clearly generated outputs.
-    We want originals from the source workbook for Straight Comparison.
-    """
-    n = (name or "").strip().lower()
-    if not n:
-        return True
-    if " vs " in n:
-        return True
-    if n.startswith("straight comparison"):
-        return True
-    if n.startswith("batch comparison"):
-        return True
-    if n.startswith("comparison"):
-        return True
-    return False
-
-
-def _ordered_original_sheets(src_workbook: str, pairs: Sequence[Tuple[str, str]]) -> List[str]:
-    """
-    If pairs are provided: return sheets involved in pairs in workbook order.
-    If pairs is empty: return ALL likely-original scenario sheets in workbook order.
-    """
-    try:
-        wb = load_workbook(src_workbook, read_only=True, data_only=True)
-        sheetnames = list(wb.sheetnames)
-
-        # If no pairs, include all "original-looking" sheets
-        if not pairs:
-            originals = [s for s in sheetnames if not _looks_like_output_sheet(s)]
-            return originals
-
-        wanted: set[str] = set()
-        for a, b in pairs:
-            wanted.add(a)
-            wanted.add(b)
-
-        ordered = [s for s in sheetnames if s in wanted]
-        for s in wanted:
-            if s not in ordered:
-                ordered.append(s)
-        return ordered
-
-    except Exception:
-        # Fallback behavior if workbook can't be opened
-        if not pairs:
-            return []
-
-        ordered: List[str] = []
-        seen: set[str] = set()
-        for a, b in pairs:
-            for s in (a, b):
-                if s not in seen:
-                    seen.add(s)
-                    ordered.append(s)
-        return ordered
+    return pd.DataFrame.from_records(records)
 
 
 def build_batch_comparison_workbook(
-    src_workbook: Optional[str] = None,
-    pairs: Sequence[Tuple[str, str]] = (),
-    threshold: float = 0.0,
-    output_path: str = "",
-    log_func=None,
-    *,
+    src_workbook: str,
+    pairs: Sequence[Tuple[str, str]],
+    threshold: float,
+    output_path: str,
+    log_func: Optional[Callable[[str], None]] = None,
     expandable_issue_view: bool = True,
-    workbook_path: Optional[str] = None,
-    **kwargs,
 ) -> str:
+    """Create a batch workbook with one formatted sheet per (left,right) pair."""
+    if not pairs:
+        raise ValueError("No comparison pairs provided.")
+
+    # Import here to avoid circular imports
+    from core.batch_sheet_writer import write_formatted_pair_sheet
+
     if not OPENPYXL_AVAILABLE:
-        raise RuntimeError("openpyxl is required to build the batch workbook.")
+        raise RuntimeError("openpyxl is required to build batch workbooks.")
 
-    if src_workbook is None:
-        src_workbook = workbook_path
-    if src_workbook is None:
-        src_workbook = kwargs.get("src_workbook") or kwargs.get("workbook") or kwargs.get("path")
-    if not src_workbook:
-        raise ValueError("Missing source workbook path (src_workbook / workbook_path).")
+    out_wb = Workbook()
+    # Remove default
+    if out_wb.active is not None:
+        out_wb.remove(out_wb.active)
 
-    # IMPORTANT UPDATE:
-    # pairs can be empty -> build a workbook with only Straight Comparison.
-
-    wb = Workbook()
-    wb.remove(wb.active)
-
-    used_names: set[str] = set()
-
-    # Pair sheets (only if pairs exist)
-    if pairs:
-        for (left_sheet, right_sheet) in pairs:
-            df_pair = build_pair_comparison_df(
-                src_workbook, left_sheet, right_sheet, threshold, log_func=log_func
-            )
-            if df_pair.empty:
-                df_pair = pd.DataFrame([{
-                    "CaseType": "",
-                    "Contingency": "No rows above threshold.",
-                    "ResultingIssue": "",
-                    "LeftPct": None,
-                    "RightPct": None,
-                    "DeltaDisplay": "",
-                }])
-
-            base_name = _sanitize_sheet_name(f"{left_sheet} vs {right_sheet}")
-            name = base_name
-            counter = 2
-            while name in used_names:
-                suffix = f" ({counter})"
-                name = _sanitize_sheet_name(base_name[: (31 - len(suffix))] + suffix)
-                counter += 1
-            used_names.add(name)
-
-            write_formatted_pair_sheet(wb, name, df_pair, expandable_issue_view=expandable_issue_view)
-    else:
+    for left_sheet, right_sheet in pairs:
         if log_func:
-            log_func("No queued pairs provided; building Straight Comparison only.")
+            log_func(f"Building pair: {left_sheet} vs {right_sheet}")
 
-    # Straight Comparison (always attempt)
-    try:
-        originals = _ordered_original_sheets(src_workbook, pairs)
-        if not originals:
-            if log_func:
-                log_func("WARNING: No original sheets detected for Straight Comparison.")
-        else:
-            df_straight, case_labels = build_straight_comparison_df(
-                src_workbook,
-                originals,
-                threshold=threshold,
-                log_func=log_func
-            )
+        df = build_pair_comparison_df(
+            workbook_path=src_workbook,
+            left_sheet=left_sheet,
+            right_sheet=right_sheet,
+            threshold=threshold,
+            log_func=log_func,
+        )
 
-            sc_base = _sanitize_sheet_name("Straight Comparison")
-            sc_name = sc_base
-            k = 2
-            while sc_name in used_names:
-                suffix = f" ({k})"
-                sc_name = _sanitize_sheet_name(sc_base[: (31 - len(suffix))] + suffix)
-                k += 1
-            used_names.add(sc_name)
+        safe_name = f"{left_sheet} vs {right_sheet}"
+        safe_name = safe_name.replace("/", "-").replace("\\", "-")
+        safe_name = safe_name[:31]
 
-            write_formatted_straight_sheet(
-                wb,
-                sc_name,
-                df_straight,
-                case_labels,
-                expandable_issue_view=expandable_issue_view,
-            )
-    except Exception as e:
-        if log_func:
-            log_func(f"WARNING: Straight Comparison sheet failed: {e}")
+        ws = out_wb.create_sheet(title=safe_name)
+        write_formatted_pair_sheet(
+            ws=ws,
+            df=df,
+            left_label=left_sheet,
+            right_label=right_sheet,
+            expandable_issue_view=expandable_issue_view,
+            log_func=log_func,
+        )
 
-    wb.save(output_path)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    out_wb.save(output_path)
+
+    if log_func:
+        log_func(f"Saved batch workbook: {output_path}")
+
     return output_path
