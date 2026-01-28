@@ -1,259 +1,310 @@
-"""core/batch_sheet_writer.py
-
-Writes one formatted sheet for a left/right comparison pair.
-
-UPDATE (Limit column support):
-  Pair sheets now show:
-    B Contingency Events | C Resulting Issue | D Limit | E Left % | F Right % | G Δ% (Right - Left) / Status
-
-  When expandable_issue_view=True, rows are grouped by ResultingIssue with
-  the summary row showing the worst (highest max(left,right)) percent.
-"""
+# core/batch_sheet_writer.py
+#
+# Writes a batch comparison worksheet using the same blue-block style
+# as the Combined_ViolationCTG_Comparison workbook.
+#
+# Key behavior:
+# - Expandable issue view uses Excel outline (+/-)
+# - Summary row is ABOVE detail rows (so +/- appears at the TOP like your "left" workbook)
+# - The first (max) row per Resulting Issue is bolded to stand out
 
 from __future__ import annotations
 
+from typing import Optional
 import math
-from typing import Callable, Optional
-
 import pandas as pd
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+from openpyxl import Workbook
+from openpyxl.worksheet.worksheet import Worksheet
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 
-PRETTY_CASE_NAMES = {
-    "ACCA_LongTerm": "ACCA LongTerm",
-    "ACCA_P1,2,4,7": "ACCA",
-    "DCwACver_P1-7": "DCwAC",
-}
+# ===== Formatting helpers ====================================================
 
+def apply_table_styles(ws: Worksheet):
+    """
+    Set reasonable column widths and outline settings for a formatted comparison sheet.
+    """
+    widths = {
+        2: 45,  # B: Contingency Events
+        3: 45,  # C: Resulting Issue
+        4: 15,  # D: Left %
+        5: 15,  # E: Right %
+        6: 22,  # F: Delta / Status
+    }
+    for col_idx, width in widths.items():
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-def _is_nan(x) -> bool:
-    return isinstance(x, float) and math.isnan(x)
-
-
-def _fmt_pct(x) -> str:
-    if x is None:
-        return ""
-    if isinstance(x, str):
-        return x
+    # Make outline symbols visible + summary row above details
     try:
-        if _is_nan(float(x)):
-            return ""
-        return f"{float(x):.2f}"
+        ws.sheet_properties.outlinePr.summaryBelow = False
+        ws.sheet_properties.outlinePr.summaryRight = False
+        ws.sheet_properties.outlinePr.applyStyles = True
     except Exception:
-        return str(x)
+        pass
 
-
-def _to_float(x) -> float:
-    if x is None:
-        return float("nan")
-    if isinstance(x, (int, float)):
-        try:
-            return float(x)
-        except Exception:
-            return float("nan")
-    s = str(x).strip().replace("%", "")
     try:
-        return float(s)
+        ws.sheet_view.showOutlineSymbols = True
     except Exception:
-        return float("nan")
+        pass
 
 
-# --------------------------- styles --------------------------- #
+HEADER_FILL = PatternFill("solid", fgColor="305496")  # dark blue
+HEADER_FONT = Font(color="FFFFFF", bold=True)
+TITLE_FILL = HEADER_FILL
+TITLE_FONT = Font(color="FFFFFF", bold=True, size=12)
 
-title_fill = PatternFill(fill_type="solid", fgColor="305496")
-title_font = Font(color="FFFFFF", bold=True, size=12)
-
-header_fill = PatternFill(fill_type="solid", fgColor="305496")
-header_font = Font(color="FFFFFF", bold=True)
-
-data_font = Font(color="000000")
-data_bold_font = Font(color="000000", bold=True)
-
-center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
-
-thin_border = Border(
+THIN_BORDER = Border(
     left=Side(style="thin"),
     right=Side(style="thin"),
     top=Side(style="thin"),
     bottom=Side(style="thin"),
 )
 
-
-def _setup_columns(ws):
-    # Columns are B..G
-    widths = {
-        2: 55,  # Contingency
-        3: 55,  # Resulting Issue
-        4: 18,  # Limit
-        5: 12,  # Left %
-        6: 12,  # Right %
-        7: 22,  # Delta / Status
-    }
-    for col_idx, w in widths.items():
-        ws.column_dimensions[chr(ord("A") + col_idx - 1)].width = w
+CELL_ALIGN_WRAP = Alignment(wrap_text=True, vertical="top")
+CELL_ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
 
-def _write_title_row(ws, row: int, title: str) -> int:
-    # Merge B..G
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=7)
-    c = ws.cell(row=row, column=2)
-    c.value = title
-    c.fill = title_fill
-    c.font = title_font
-    c.alignment = center
-    for col in range(2, 8):
-        ws.cell(row=row, column=col).border = thin_border
-    return row + 1
+def _is_nan(x) -> bool:
+    return isinstance(x, float) and math.isnan(x)
 
 
-def _write_header_row(ws, row: int, left_label: str, right_label: str) -> int:
+def _max_pct(left: Optional[float], right: Optional[float]) -> float:
+    vals = []
+    if left is not None and not _is_nan(left):
+        vals.append(float(left))
+    if right is not None and not _is_nan(right):
+        vals.append(float(right))
+    return max(vals) if vals else float("-inf")
+
+
+def _normalize_issue_series(series: pd.Series) -> pd.Series:
+    """
+    Forward-fill blanks so that blank ResultingIssue inherits the issue above.
+
+    Avoid pandas Series.replace(...) due to pandas version quirks that can throw:
+      "'regex' must be a string ... you passed a 'bool'"
+    """
+    s = series.copy()
+
+    def is_blank(v) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, float) and math.isnan(v):
+            return True
+        if isinstance(v, str) and v.strip() == "":
+            return True
+        return False
+
+    mask = s.apply(is_blank)
+    s = s.mask(mask)
+    s = s.ffill()
+    return s.fillna("")
+
+
+def _write_title_row(ws: Worksheet, row: int, title: str):
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+    cell = ws.cell(row=row, column=2)
+    cell.value = title
+    cell.fill = TITLE_FILL
+    cell.font = TITLE_FONT
+    cell.alignment = CELL_ALIGN_CENTER
+
+
+def _write_header_row(ws: Worksheet, row: int):
     headers = [
-        ("B", "Contingency Events"),
-        ("C", "Resulting Issue"),
-        ("D", "Limit"),
-        ("E", f"{left_label}"),
-        ("F", f"{right_label}"),
-        ("G", "Δ% (Right - Left) /\nStatus"),
+        "Contingency Events",
+        "Resulting Issue",
+        "Left %",
+        "Right %",
+        "Δ% (Right - Left) / Status",
     ]
-    for col_letter, text in headers:
-        col_idx = ord(col_letter) - ord("A") + 1
-        c = ws.cell(row=row, column=col_idx)
-        c.value = text
-        c.fill = header_fill
-        c.font = header_font
-        c.alignment = center
-        c.border = thin_border
-    return row + 1
+    for col_offset, header in enumerate(headers):
+        cell = ws.cell(row=row, column=2 + col_offset)
+        cell.value = header
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = CELL_ALIGN_CENTER
+        cell.border = THIN_BORDER
 
 
-def _write_data_row(ws, row: int, cont: str, issue: str, limit: str, left_pct, right_pct, delta_text: str, bold: bool) -> int:
-    font = data_bold_font if bold else data_font
+def _write_data_row(
+    ws: Worksheet,
+    row: int,
+    cont: str,
+    issue: str,
+    left_pct,
+    right_pct,
+    delta,
+    *,
+    outline_level: int = 0,
+    hidden: bool = False,
+    bold: bool = False,
+):
+    values = [cont, issue, left_pct, right_pct, delta]
 
-    values = [cont, issue, limit, _fmt_pct(left_pct), _fmt_pct(right_pct), delta_text]
-    for i, v in enumerate(values, start=2):  # B=2
-        c = ws.cell(row=row, column=i)
-        c.value = v
-        c.font = font
-        c.alignment = left_align if i in (2, 3) else center
-        c.border = thin_border
-    return row + 1
+    for col_offset, val in enumerate(values):
+        cell = ws.cell(row=row, column=2 + col_offset)
+        cell.value = val
+        cell.border = THIN_BORDER
 
+        # Bold summary/max row for readability
+        if bold:
+            base = cell.font or Font()
+            cell.font = Font(
+                name=base.name,
+                size=base.size,
+                bold=True,
+                italic=base.italic,
+                vertAlign=base.vertAlign,
+                underline=base.underline,
+                strike=base.strike,
+                color=base.color,
+            )
 
-def _write_blank_row(ws, row: int) -> int:
-    # keep borders off for blank row, but advance
-    return row + 1
+        if col_offset in (0, 1):
+            cell.alignment = CELL_ALIGN_WRAP
+        else:
+            cell.alignment = Alignment(horizontal="right", vertical="top")
 
+        if col_offset in (2, 3) and isinstance(val, (float, int)):
+            cell.number_format = "0.00"
 
-# --------------------------- public --------------------------- #
+    # Outline / hidden controls (Excel +/-)
+    try:
+        ws.row_dimensions[row].outlineLevel = int(outline_level)
+        ws.row_dimensions[row].hidden = bool(hidden)
+    except Exception:
+        pass
+
 
 def write_formatted_pair_sheet(
-    ws,
-    df: pd.DataFrame,
-    left_label: str,
-    right_label: str,
+    wb: Workbook,
+    ws_name: str,
+    df_pair: pd.DataFrame,
+    *,
     expandable_issue_view: bool = True,
-    log_func: Optional[Callable[[str], None]] = None,
-) -> None:
-    """Write a formatted comparison sheet into an openpyxl worksheet."""
-    _setup_columns(ws)
+):
+    """
+    Create one sheet in the batch workbook using the blue-block style.
 
-    # Excel outline behavior: summary rows ABOVE details
-    ws.sheet_properties.outlinePr.summaryBelow = False
+    If expandable_issue_view=True:
+      - groups within each CaseType block by ResultingIssue
+      - sorts each issue group by max(LeftPct, RightPct) desc
+      - keeps the top row visible + bolded, hides the rest (outlineLevel=1)
+      - blanks ResultingIssue on hidden rows for readability
+      - outline summary is ABOVE details (summaryBelow=False), so +/- appears at top
+      - marks the summary row as collapsed so Excel shows the + correctly
+    """
+    ws = wb.create_sheet(title=ws_name)
+    apply_table_styles(ws)
 
-    current_row = 2  # blank row 1 (matches the builder workbook convention)
-
-    # Expect df columns: CaseType, Contingency, ResultingIssue, Limit, LeftPct, RightPct, DeltaDisplay
-    if df is None or df.empty:
-        # still write a small notice
-        current_row = _write_title_row(ws, current_row, f"{left_label} vs {right_label}")
-        current_row = _write_header_row(ws, current_row, left_label, right_label)
-        _write_data_row(ws, current_row, "No rows", "", "", "", "", "", True)
+    if df_pair is None or df_pair.empty:
+        ws.cell(row=2, column=2).value = "No rows above threshold."
         return
 
-    for case_type, block in df.groupby("CaseType", sort=False):
-        pretty = PRETTY_CASE_NAMES.get(case_type, str(case_type))
+    current_row = 2
 
-        current_row = _write_title_row(ws, current_row, pretty)
-        current_row = _write_header_row(ws, current_row, left_label, right_label)
+    for case_type_pretty in ["ACCA LongTerm", "ACCA", "DCwAC"]:
+        sub = df_pair[df_pair["CaseType"] == case_type_pretty].copy()
+        if sub.empty:
+            continue
 
-        block = block.copy()
-        block["_left_num"] = block["LeftPct"].apply(_to_float)
-        block["_right_num"] = block["RightPct"].apply(_to_float)
-        block["_max"] = block.apply(
-            lambda r: max([v for v in [r["_left_num"], r["_right_num"]] if not _is_nan(v)] or [float("nan")]),
+        # Normalize blank issues -> same as above (safety net)
+        if "ResultingIssue" not in sub.columns:
+            sub["ResultingIssue"] = ""
+        sub["ResultingIssue"] = _normalize_issue_series(sub["ResultingIssue"])
+
+        # Title + header rows
+        _write_title_row(ws, current_row, case_type_pretty)
+        current_row += 1
+        _write_header_row(ws, current_row)
+        current_row += 1
+
+        if not expandable_issue_view:
+            for _, r in sub.iterrows():
+                cont = str(r.get("Contingency", "") or "")
+                issue = str(r.get("ResultingIssue", "") or "")
+                left_pct = r.get("LeftPct", None)
+                right_pct = r.get("RightPct", None)
+                delta = str(r.get("DeltaDisplay", "") or "")
+
+                _write_data_row(
+                    ws,
+                    current_row,
+                    cont,
+                    issue,
+                    left_pct,
+                    right_pct,
+                    delta,
+                    outline_level=0,
+                    hidden=False,
+                    bold=False,
+                )
+                current_row += 1
+
+            current_row += 1
+            continue
+
+        # Expandable: group by issue, sort each group by max pct desc
+        sub["_SortKey"] = sub.apply(
+            lambda r: _max_pct(r.get("LeftPct", None), r.get("RightPct", None)),
             axis=1,
         )
 
-        if expandable_issue_view and "ResultingIssue" in block.columns:
-            # Group rows by ResultingIssue; summary row is max(_max)
-            for issue, g in (
-                block.sort_values(by=["ResultingIssue", "_max"], ascending=[True, False], kind="mergesort")
-                .groupby("ResultingIssue", sort=True)
-            ):
-                if g.empty:
-                    continue
+        group_max = (
+            sub.groupby("ResultingIssue")["_SortKey"]
+            .max()
+            .sort_values(ascending=False)
+        )
+        ordered_issues = list(group_max.index)
 
-                # summary row = worst row
-                g = g.sort_values(by=["_max"], ascending=[False], kind="mergesort")
-                r0 = g.iloc[0]
+        for issue_key in ordered_issues:
+            g = sub[sub["ResultingIssue"] == issue_key].copy()
+            if g.empty:
+                continue
 
-                summary_row = current_row
-                current_row = _write_data_row(
+            g = g.sort_values(by="_SortKey", ascending=False, na_position="last")
+
+            summary_row_index = None
+            first = True
+
+            for _, r in g.iterrows():
+                cont = str(r.get("Contingency", "") or "")
+                issue = str(r.get("ResultingIssue", "") or "")
+
+                # Blank issue text for the hidden (detail) rows
+                issue_display = issue if first else ""
+
+                left_pct = r.get("LeftPct", None)
+                right_pct = r.get("RightPct", None)
+                delta = str(r.get("DeltaDisplay", "") or "")
+
+                if first:
+                    summary_row_index = current_row
+
+                _write_data_row(
                     ws,
                     current_row,
-                    str(r0.get("Contingency", "")),
-                    str(r0.get("ResultingIssue", "")),
-                    str(r0.get("Limit", "")),
-                    r0.get("LeftPct", ""),
-                    r0.get("RightPct", ""),
-                    str(r0.get("DeltaDisplay", "")),
-                    True,
+                    cont,
+                    issue_display,
+                    left_pct,
+                    right_pct,
+                    delta,
+                    outline_level=0 if first else 1,
+                    hidden=False if first else True,
+                    bold=True if first else False,
                 )
+                current_row += 1
+                first = False
 
-                # detail rows
-                detail_start = None
-                detail_end = None
-                for _, rr in g.iloc[1:].iterrows():
-                    if detail_start is None:
-                        detail_start = current_row
+            # Mark the summary row as collapsed when there are details
+            try:
+                if summary_row_index is not None and len(g) > 1:
+                    ws.row_dimensions[summary_row_index].collapsed = True
+            except Exception:
+                pass
 
-                    current_row = _write_data_row(
-                        ws,
-                        current_row,
-                        str(rr.get("Contingency", "")),
-                        "",  # keep issue blank in details to visually group
-                        str(rr.get("Limit", "")),
-                        rr.get("LeftPct", ""),
-                        rr.get("RightPct", ""),
-                        str(rr.get("DeltaDisplay", "")),
-                        False,
-                    )
-                    detail_end = current_row - 1
-
-                if detail_start is not None and detail_end is not None:
-                    ws.row_dimensions.group(
-                        detail_start,
-                        detail_end,
-                        outline_level=1,
-                        hidden=True,
-                    )
-                    ws.row_dimensions[summary_row].collapsed = True
-
-        else:
-            # No grouping: dump sorted by max desc
-            block = block.sort_values(by=["_max"], ascending=[False], kind="mergesort")
-            for _, rr in block.iterrows():
-                current_row = _write_data_row(
-                    ws,
-                    current_row,
-                    str(rr.get("Contingency", "")),
-                    str(rr.get("ResultingIssue", "")),
-                    str(rr.get("Limit", "")),
-                    rr.get("LeftPct", ""),
-                    rr.get("RightPct", ""),
-                    str(rr.get("DeltaDisplay", "")),
-                    False,
-                )
-
-        current_row = _write_blank_row(ws, current_row)
+        # Blank row between blocks
+        current_row += 1
