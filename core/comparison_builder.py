@@ -166,7 +166,8 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
         bottom=Side(style="thin"),
     )
 
-    required_cols = ["CTGLabel", "LimViolLimit" , "LimViolValue", "LimViolPct"]
+    # Your updated required columns
+    required_cols = ["CTGLabel", "LimViolLimit", "LimViolValue", "LimViolPct"]
 
     for folder_name, df in scenario_data.items():
         sheet_name = (folder_name or "Sheet").strip()[:31] or "Sheet"
@@ -179,10 +180,10 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
         ws.column_dimensions["B"].width = 55  # Contingency Events
         ws.column_dimensions["C"].width = 55  # Resulting Issue
         ws.column_dimensions["D"].width = 18  # Limit
-        ws.column_dimensions["E"].width = 18  # Contingency Value (MVA)
+        ws.column_dimensions["E"].width = 22  # Contingency Value (MVA)
         ws.column_dimensions["F"].width = 18  # Percent Loading
 
-        # ✅ Shift everything down by 1 row
+        # Shift everything down by 1 row
         current_row = 2
 
         for label in TARGET_PATTERNS:
@@ -193,17 +194,19 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
             pretty_name = PRETTY_CASE_NAMES.get(label, label)
 
             # ===== Title row =====
-            ws.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=5)
+            # FIX: merge through column F (6) now that we have 5 data cols B-F
+            ws.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=6)
             c = ws.cell(row=current_row, column=2)
             c.value = pretty_name
             c.fill = title_fill
             c.font = title_font
             c.alignment = center
-            for col in range(2, 6):
+            for col in range(2, 7):  # B..F
                 ws.cell(row=current_row, column=col).border = thin_border
             current_row += 1
 
             # ===== Header row =====
+            # FIX: you were missing a comma after ("D","Limit")
             headers = [
                 ("B", "Contingency Events"),
                 ("C", "Resulting Issue"),
@@ -275,35 +278,17 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                     # Summary row (max)
                     r0 = rows[0]
 
-                    cB = ws.cell(row=current_row, column=2)
-                    cB.value = getattr(r0, "CTGLabel", "")
-                    cB.font = data_bold_font
-                    cB.alignment = left_align
-                    cB.border = thin_border
+                    ws.cell(row=current_row, column=2).value = getattr(r0, "CTGLabel", "")
+                    ws.cell(row=current_row, column=3).value = getattr(r0, "LimViolID", "")
+                    ws.cell(row=current_row, column=4).value = getattr(r0, "LimViolLimit", "")
+                    ws.cell(row=current_row, column=5).value = getattr(r0, "LimViolValue", "")
+                    ws.cell(row=current_row, column=6).value = getattr(r0, "LimViolPct", "")
 
-                    cC = ws.cell(row=current_row, column=3)
-                    cC.value = getattr(r0, "LimViolID", "")
-                    cC.font = data_bold_font
-                    cC.alignment = left_align
-                    cC.border = thin_border
-
-                    cD = ws.cell(row=current_row, column=4)
-                    cD.value = getattr(r0, "LimViolLimit", "")
-                    cD.font = data_bold_font
-                    cD.alignment = center
-                    cD.border = thin_border
-
-                    cD = ws.cell(row=current_row, column=5)
-                    cD.value = getattr(r0, "LimViolValue", "")
-                    cD.font = data_bold_font
-                    cD.alignment = center
-                    cD.border = thin_border
-
-                    cE = ws.cell(row=current_row, column=6)
-                    cE.value = getattr(r0, "LimViolPct", "")
-                    cE.font = data_bold_font
-                    cE.alignment = center
-                    cE.border = thin_border
+                    for col in range(2, 7):
+                        cell = ws.cell(row=current_row, column=col)
+                        cell.font = data_bold_font
+                        cell.border = thin_border
+                        cell.alignment = left_align if col in (2, 3) else center
 
                     summary_row = current_row
                     current_row += 1
@@ -316,35 +301,17 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                         if detail_start is None:
                             detail_start = current_row
 
-                        cB = ws.cell(row=current_row, column=2)
-                        cB.value = getattr(r, "CTGLabel", "")
-                        cB.font = data_font
-                        cB.alignment = left_align
-                        cB.border = thin_border
+                        ws.cell(row=current_row, column=2).value = getattr(r, "CTGLabel", "")
+                        ws.cell(row=current_row, column=3).value = ""
+                        ws.cell(row=current_row, column=4).value = getattr(r, "LimViolLimit", "")
+                        ws.cell(row=current_row, column=5).value = getattr(r, "LimViolValue", "")
+                        ws.cell(row=current_row, column=6).value = getattr(r, "LimViolPct", "")
 
-                        cC = ws.cell(row=current_row, column=3)
-                        cC.value = ""
-                        cC.font = data_font
-                        cC.alignment = left_align
-                        cC.border = thin_border
-
-                        cD = ws.cell(row=current_row, column=4)
-                        cD.value = getattr(r, "LimViolLimit", "")
-                        cD.font = data_font
-                        cD.alignment = center
-                        cD.border = thin_border
-
-                        cD = ws.cell(row=current_row, column=5)
-                        cD.value = getattr(r, "LimViolValue", "")
-                        cD.font = data_font
-                        cD.alignment = center
-                        cD.border = thin_border
-
-                        cE = ws.cell(row=current_row, column=6)
-                        cE.value = getattr(r, "LimViolPct", "")
-                        cE.font = data_font
-                        cE.alignment = center
-                        cE.border = thin_border
+                        for col in range(2, 7):
+                            cell = ws.cell(row=current_row, column=col)
+                            cell.font = data_font
+                            cell.border = thin_border
+                            cell.alignment = left_align if col in (2, 3) else center
 
                         detail_end = current_row
                         current_row += 1
@@ -361,35 +328,17 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
             else:
                 # No grouping: dump rows
                 for _, row in block_df.iterrows():
-                    c = ws.cell(row=current_row, column=2)
-                    c.value = row.get("CTGLabel", "")
-                    c.font = data_font
-                    c.alignment = left_align
-                    c.border = thin_border
+                    ws.cell(row=current_row, column=2).value = row.get("CTGLabel", "")
+                    ws.cell(row=current_row, column=3).value = row.get("LimViolID", "") if has_limviolid else ""
+                    ws.cell(row=current_row, column=4).value = row.get("LimViolLimit", "")
+                    ws.cell(row=current_row, column=5).value = row.get("LimViolValue", "")
+                    ws.cell(row=current_row, column=6).value = row.get("LimViolPct", "")
 
-                    c = ws.cell(row=current_row, column=3)
-                    c.value = row.get("LimViolID", "") if has_limviolid else ""
-                    c.font = data_font
-                    c.alignment = left_align
-                    c.border = thin_border
-
-                    c = ws.cell(row=current_row, column=4)
-                    c.value = row.get("LimViolLimit", "")
-                    c.font = data_font
-                    c.alignment = center
-                    c.border = thin_border
-
-                    c = ws.cell(row=current_row, column=5)
-                    c.value = row.get("LimViolValue", "")
-                    c.font = data_font
-                    c.alignment = center
-                    c.border = thin_border
-
-                    c = ws.cell(row=current_row, column=6)
-                    c.value = row.get("LimViolPct", "")
-                    c.font = data_font
-                    c.alignment = center
-                    c.border = thin_border
+                    for col in range(2, 7):
+                        cell = ws.cell(row=current_row, column=col)
+                        cell.font = data_font
+                        cell.border = thin_border
+                        cell.alignment = left_align if col in (2, 3) else center
 
                     current_row += 1
 
