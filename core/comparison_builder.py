@@ -166,7 +166,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
         bottom=Side(style="thin"),
     )
 
-    required_cols = ["CTGLabel", "LimViolValue", "LimViolPct"]
+    required_cols = ["CTGLabel", "LimViolLimit" , "LimViolValue", "LimViolPct"]
 
     for folder_name, df in scenario_data.items():
         sheet_name = (folder_name or "Sheet").strip()[:31] or "Sheet"
@@ -175,11 +175,12 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
         # Excel outline behavior: summary rows ABOVE details (so dropdown is on the max row)
         ws.sheet_properties.outlinePr.summaryBelow = False
 
-        # Set column widths – contiguous columns B to E
+        # Set column widths – contiguous columns B to F
         ws.column_dimensions["B"].width = 55  # Contingency Events
         ws.column_dimensions["C"].width = 55  # Resulting Issue
-        ws.column_dimensions["D"].width = 18  # Contingency Value (MVA)
-        ws.column_dimensions["E"].width = 18  # Percent Loading
+        ws.column_dimensions["D"].width = 18  # Limit
+        ws.column_dimensions["E"].width = 18  # Contingency Value (MVA)
+        ws.column_dimensions["F"].width = 18  # Percent Loading
 
         # ✅ Shift everything down by 1 row
         current_row = 2
@@ -206,8 +207,9 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
             headers = [
                 ("B", "Contingency Events"),
                 ("C", "Resulting Issue"),
-                ("D", "Contingency Value (MVA)"),
-                ("E", "Percent Loading"),
+                ("D", "Limit")
+                ("E", "Contingency Value (MVA)"),
+                ("F", "Percent Loading"),
             ]
             for col_letter, text in headers:
                 col_idx = ord(col_letter) - ord("A") + 1
@@ -286,12 +288,18 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                     cC.border = thin_border
 
                     cD = ws.cell(row=current_row, column=4)
+                    cD.value = getattr(r0, "LimViolLimit", "")
+                    cD.font = data_bold_font
+                    cD.alignment = center
+                    cD.border = thin_border
+
+                    cD = ws.cell(row=current_row, column=5)
                     cD.value = getattr(r0, "LimViolValue", "")
                     cD.font = data_bold_font
                     cD.alignment = center
                     cD.border = thin_border
 
-                    cE = ws.cell(row=current_row, column=5)
+                    cE = ws.cell(row=current_row, column=6)
                     cE.value = getattr(r0, "LimViolPct", "")
                     cE.font = data_bold_font
                     cE.alignment = center
@@ -321,12 +329,18 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                         cC.border = thin_border
 
                         cD = ws.cell(row=current_row, column=4)
+                        cD.value = getattr(r, "LimViolLimit", "")
+                        cD.font = data_font
+                        cD.alignment = center
+                        cD.border = thin_border
+
+                        cD = ws.cell(row=current_row, column=5)
                         cD.value = getattr(r, "LimViolValue", "")
                         cD.font = data_font
                         cD.alignment = center
                         cD.border = thin_border
 
-                        cE = ws.cell(row=current_row, column=5)
+                        cE = ws.cell(row=current_row, column=6)
                         cE.value = getattr(r, "LimViolPct", "")
                         cE.font = data_font
                         cE.alignment = center
@@ -360,12 +374,18 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                     c.border = thin_border
 
                     c = ws.cell(row=current_row, column=4)
-                    c.value = row.get("LimViolValue", "")
+                    c.value = row.get("LimViolLimit", "")
                     c.font = data_font
                     c.alignment = center
                     c.border = thin_border
 
                     c = ws.cell(row=current_row, column=5)
+                    c.value = row.get("LimViolValue", "")
+                    c.font = data_font
+                    c.alignment = center
+                    c.border = thin_border
+
+                    c = ws.cell(row=current_row, column=6)
                     c.value = row.get("LimViolPct", "")
                     c.font = data_font
                     c.alignment = center
