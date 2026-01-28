@@ -207,7 +207,7 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
             headers = [
                 ("B", "Contingency Events"),
                 ("C", "Resulting Issue"),
-                ("D", "Limit")
+                ("D", "Limit"),
                 ("E", "Contingency Value (MVA)"),
                 ("F", "Percent Loading"),
             ]
