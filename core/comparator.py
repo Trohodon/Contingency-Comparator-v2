@@ -11,8 +11,10 @@
 #   - build_batch_comparison_workbook(... )
 #
 # UPDATED:
-#   - build_batch_comparison_workbook now allows pairs=[] so users can build a
-#     workbook containing ONLY the "Straight Comparison" sheet (all originals).
+#   - Parsing supports BOTH old formatted sheets (no Limit column) and new ones (with Limit).
+#   - Pair + Straight Comparison outputs can include Limit.
+#   - build_batch_comparison_workbook allows pairs=[] so users can build a workbook
+#     containing ONLY the "Straight Comparison" sheet (all originals).
 
 from __future__ import annotations
 
@@ -69,7 +71,26 @@ def _is_blank(v) -> bool:
     return False
 
 
+def _header_has_limit(ws, header_row: int) -> bool:
+    """Return True if the formatted header row includes a 'Limit' column in D."""
+    try:
+        d = ws.cell(row=header_row, column=4).value
+        if isinstance(d, str) and "limit" in d.strip().lower():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _parse_scenario_sheet(ws, log_func=None) -> pd.DataFrame:
+    """
+    Parse one formatted scenario sheet into rows with:
+        CaseType, CTGLabel, LimViolID, LimViolLimit, LimViolValue, LimViolPct
+
+    Supports:
+      - OLD format:  B=CTGLabel, C=LimViolID, D=LimViolValue, E=LimViolPct
+      - NEW format:  B=CTGLabel, C=LimViolID, D=LimViolLimit, E=LimViolValue, F=LimViolPct
+    """
     records: List[Dict] = []
 
     max_row = ws.max_row or 1
@@ -86,18 +107,30 @@ def _parse_scenario_sheet(ws, log_func=None) -> pd.DataFrame:
             header_row = row_idx + 1
             data_row = header_row + 1
 
-            last_issue = None
+            has_limit = _header_has_limit(ws, header_row)
 
+            last_issue = None
             r = data_row
+
             while r <= max_row:
                 b = ws.cell(row=r, column=2).value
                 c = ws.cell(row=r, column=3).value
-                d = ws.cell(row=r, column=4).value
-                e = ws.cell(row=r, column=5).value
 
-                if _is_blank(b) and _is_blank(c) and _is_blank(d) and _is_blank(e):
+                if has_limit:
+                    lim = ws.cell(row=r, column=4).value
+                    val = ws.cell(row=r, column=5).value
+                    pct = ws.cell(row=r, column=6).value
+                    blank_line = _is_blank(b) and _is_blank(c) and _is_blank(lim) and _is_blank(val) and _is_blank(pct)
+                else:
+                    lim = None
+                    val = ws.cell(row=r, column=4).value
+                    pct = ws.cell(row=r, column=5).value
+                    blank_line = _is_blank(b) and _is_blank(c) and _is_blank(val) and _is_blank(pct)
+
+                if blank_line:
                     break
 
+                # Forward fill issue if blanks are used for visual grouping
                 if _is_blank(c) and last_issue is not None:
                     c = last_issue
                 else:
@@ -109,13 +142,14 @@ def _parse_scenario_sheet(ws, log_func=None) -> pd.DataFrame:
                         "CaseType": case_type,
                         "CTGLabel": b,
                         "LimViolID": c,
-                        "LimViolValue": d,
-                        "LimViolPct": e,
+                        "LimViolLimit": lim,
+                        "LimViolValue": val,
+                        "LimViolPct": pct,
                     }
                 )
                 r += 1
 
-            row_idx = r + 1
+            row_idx = r + 1  # move past block + blank separator row
         else:
             row_idx += 1
 
@@ -146,6 +180,10 @@ def build_case_type_comparison(
     max_rows: Optional[int] = None,
     log_func=None,
 ) -> pd.DataFrame:
+    """
+    Returns a DataFrame containing:
+      Contingency, ResultingIssue, Limit, LeftPct, RightPct, DeltaPct
+    """
     if case_type not in CASE_TYPES_CANONICAL:
         raise ValueError(f"Unknown case type: {case_type}")
 
@@ -159,16 +197,32 @@ def build_case_type_comparison(
         log_func(f"  [{case_type}] base rows={len(base_df)}, new rows={len(new_df)}")
 
     if base_df.empty and new_df.empty:
-        return pd.DataFrame(columns=["Contingency", "ResultingIssue", "LeftPct", "RightPct", "DeltaPct"])
+        return pd.DataFrame(
+            columns=["Contingency", "ResultingIssue", "Limit", "LeftPct", "RightPct", "DeltaPct"]
+        )
 
-    base_df = base_df.rename(columns={"LimViolPct": "Left_Pct"})
-    new_df = new_df.rename(columns={"LimViolPct": "Right_Pct"})
+    # Percent columns MUST be numeric for delta math
+    base_df["LimViolPct"] = pd.to_numeric(base_df.get("LimViolPct"), errors="coerce")
+    new_df["LimViolPct"] = pd.to_numeric(new_df.get("LimViolPct"), errors="coerce")
+
+    base_df = base_df.rename(columns={
+        "LimViolPct": "Left_Pct",
+        "LimViolLimit": "Left_Limit",
+    })
+    new_df = new_df.rename(columns={
+        "LimViolPct": "Right_Pct",
+        "LimViolLimit": "Right_Limit",
+    })
 
     key_cols = ["CTGLabel", "LimViolID"]
-    left_cols = key_cols + ["Left_Pct"]
-    right_cols = key_cols + ["Right_Pct"]
+    left_cols = key_cols + ["Left_Pct", "Left_Limit"]
+    right_cols = key_cols + ["Right_Pct", "Right_Limit"]
 
     merged = pd.merge(base_df[left_cols], new_df[right_cols], on=key_cols, how="outer")
+
+    # Pick a single Limit value (prefer Left, else Right)
+    merged["Limit"] = merged.get("Left_Limit").combine_first(merged.get("Right_Limit"))
+
     merged["Delta_Pct"] = merged["Right_Pct"] - merged["Left_Pct"]
 
     result = merged.rename(
@@ -181,6 +235,7 @@ def build_case_type_comparison(
         }
     )
 
+    # Sort by whichever side has values
     sort_series = result["RightPct"]
     result["_SortPct"] = sort_series if sort_series.notna().any() else result["LeftPct"]
     result = result.sort_values(by="_SortPct", ascending=False, na_position="last").drop(columns=["_SortPct"])
@@ -188,7 +243,12 @@ def build_case_type_comparison(
     if max_rows is not None and max_rows > 0:
         result = result.head(max_rows)
 
-    return result
+    # Keep a clean column order
+    keep = ["Contingency", "ResultingIssue", "Limit", "LeftPct", "RightPct", "DeltaPct"]
+    for col in keep:
+        if col not in result.columns:
+            result[col] = None
+    return result[keep].copy()
 
 
 def _is_nan(x) -> bool:
@@ -220,16 +280,19 @@ def build_pair_comparison_df(
         for _, row in df.iterrows():
             cont = str(row.get("Contingency", "") or "")
             issue = "" if row.get("ResultingIssue", None) is None else str(row.get("ResultingIssue"))
+            limit = row.get("Limit", None)
+
             left_pct = row.get("LeftPct", math.nan)
             right_pct = row.get("RightPct", math.nan)
             delta_pct = row.get("DeltaPct", math.nan)
 
+            # Threshold filter uses the max of (left, right)
             values = []
             if not _is_nan(left_pct):
                 values.append(float(left_pct))
             if not _is_nan(right_pct):
                 values.append(float(right_pct))
-            if not values or max(values) < threshold:
+            if not values or max(values) < float(threshold):
                 continue
 
             if _is_nan(left_pct) and not _is_nan(right_pct):
@@ -246,6 +309,7 @@ def build_pair_comparison_df(
                     "CaseType": pretty,
                     "Contingency": cont,
                     "ResultingIssue": issue,
+                    "Limit": limit,
                     "LeftPct": float(left_pct) if not _is_nan(left_pct) else None,
                     "RightPct": float(right_pct) if not _is_nan(right_pct) else None,
                     "DeltaDisplay": delta_text,
@@ -271,10 +335,7 @@ def _sanitize_sheet_name(name: str) -> str:
 
 
 def _looks_like_output_sheet(name: str) -> bool:
-    """
-    Filter out sheets that are clearly generated outputs.
-    We want originals from the source workbook for Straight Comparison.
-    """
+    """Filter out sheets that are clearly generated outputs."""
     n = (name or "").strip().lower()
     if not n:
         return True
@@ -350,9 +411,7 @@ def build_batch_comparison_workbook(
     if not src_workbook:
         raise ValueError("Missing source workbook path (src_workbook / workbook_path).")
 
-    # IMPORTANT UPDATE:
     # pairs can be empty -> build a workbook with only Straight Comparison.
-
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -369,6 +428,7 @@ def build_batch_comparison_workbook(
                     "CaseType": "",
                     "Contingency": "No rows above threshold.",
                     "ResultingIssue": "",
+                    "Limit": None,
                     "LeftPct": None,
                     "RightPct": None,
                     "DeltaDisplay": "",
