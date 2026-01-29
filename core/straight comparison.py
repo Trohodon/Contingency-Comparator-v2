@@ -5,9 +5,13 @@
 #
 # Output is styled to match the blue-block look of the batch comparison sheets:
 # - CaseType blocks (ACCA LongTerm / ACCA / DCwAC)
-# - Columns: Contingency Events | Resulting Issue | <one % column per scenario>
+# - Columns: Contingency Events | Resulting Issue | Limit | <one % column per scenario>
 # - Optional Excel +/- outline grouped by Resulting Issue (summary row ABOVE details)
 # - The top (max) row per Resulting Issue is bolded (like the batch sheets)
+#
+# UPDATED (Limit column):
+# - Parses both old formatted sheets (no Limit) and new ones (with Limit).
+# - Writes "Limit" in column D, and scenario % columns start at column E.
 
 from __future__ import annotations
 
@@ -60,45 +64,64 @@ def _is_blank(v) -> bool:
     return False
 
 
+def _header_has_limit_from_row(d_val) -> bool:
+    if isinstance(d_val, str) and "limit" in d_val.strip().lower():
+        return True
+    return False
+
+
 def _parse_scenario_sheet(ws: Worksheet, log_func=None) -> pd.DataFrame:
     """
     Parse one formatted scenario sheet into rows with:
-        CaseType, CTGLabel, LimViolID, LimViolPct
+        CaseType, CTGLabel, LimViolID, LimViolLimit, LimViolPct
 
-    Uses iter_rows(values_only=True) for speed.
-
-    NOTE:
-      Resulting Issue cells may be blank for visual grouping. Those blanks mean
-      "same as above" within the current CaseType block; we forward-fill LimViolID.
+    Supports:
+      - OLD format:  B=CTGLabel, C=LimViolID, D=LimViolValue, E=LimViolPct
+      - NEW format:  B=CTGLabel, C=LimViolID, D=LimViolLimit, E=LimViolValue, F=LimViolPct
     """
     records: List[Dict] = []
 
     current_case_type = None
     skip_rows = 0
     last_issue = None
+    has_limit: Optional[bool] = None
 
-    # We read columns B..E (2..5)
-    for (b, c, d, e) in ws.iter_rows(min_row=1, min_col=2, max_col=5, values_only=True):
+    # Read columns B..F (2..6) so we can support both formats.
+    for (b, c, d, e, f) in ws.iter_rows(min_row=1, min_col=2, max_col=6, values_only=True):
         # Not currently inside a case-type block
         if current_case_type is None:
             if isinstance(b, str) and b.strip():
                 pretty = b.strip()
                 current_case_type = CANONICAL_CASE_TYPES.get(pretty, pretty)
-                skip_rows = 1  # skip the header row immediately after the title row
+                skip_rows = 1  # next row is header
                 last_issue = None
+                has_limit = None
             continue
 
-        # Inside a block: skip header row once
+        # Inside a block: header row
         if skip_rows > 0:
+            # Determine format by inspecting column D header
+            has_limit = _header_has_limit_from_row(d)
             skip_rows -= 1
             continue
 
-        # End of block condition: blank line across B..E
-        if _is_blank(b) and _is_blank(c) and _is_blank(d) and _is_blank(e):
-            current_case_type = None
-            skip_rows = 0
-            last_issue = None
-            continue
+        # End of block condition: blank line across expected columns
+        if has_limit:
+            # NEW: B,C,D,E,F must all be blank to end
+            if _is_blank(b) and _is_blank(c) and _is_blank(d) and _is_blank(e) and _is_blank(f):
+                current_case_type = None
+                skip_rows = 0
+                last_issue = None
+                has_limit = None
+                continue
+        else:
+            # OLD: B,C,D,E blank to end
+            if _is_blank(b) and _is_blank(c) and _is_blank(d) and _is_blank(e):
+                current_case_type = None
+                skip_rows = 0
+                last_issue = None
+                has_limit = None
+                continue
 
         # Forward fill issue if missing
         if _is_blank(c) and last_issue is not None:
@@ -107,12 +130,20 @@ def _parse_scenario_sheet(ws: Worksheet, log_func=None) -> pd.DataFrame:
             if not _is_blank(c):
                 last_issue = c
 
+        if has_limit:
+            lim = d
+            pct = f
+        else:
+            lim = None
+            pct = e
+
         records.append(
             {
                 "CaseType": current_case_type,
                 "CTGLabel": b,
                 "LimViolID": c,
-                "LimViolPct": e,
+                "LimViolLimit": lim,
+                "LimViolPct": pct,
             }
         )
 
@@ -127,8 +158,6 @@ def discover_scenario_sheets(workbook_path: str, log_func=None, scan_rows: int =
     FAST scenario sheet discovery:
     A "scenario sheet" is any sheet that *looks* like the formatted output
     (i.e., contains at least one of the case-type titles in column B early on).
-
-    This avoids parsing full sheets (which was slow).
     """
     if not os.path.isfile(workbook_path):
         raise FileNotFoundError(f"Workbook not found: {workbook_path}")
@@ -140,7 +169,6 @@ def discover_scenario_sheets(workbook_path: str, log_func=None, scan_rows: int =
         try:
             ws = wb[name]
             hit = False
-            # scan only column B for first scan_rows rows
             for (b_val,) in ws.iter_rows(min_row=1, max_row=scan_rows, min_col=2, max_col=2, values_only=True):
                 if isinstance(b_val, str):
                     s = b_val.strip()
@@ -158,7 +186,7 @@ def discover_scenario_sheets(workbook_path: str, log_func=None, scan_rows: int =
 
 
 # ---------------------------------------------------------------------------
-# Build a straight comparison dataframe (NOW loads workbook ONCE)
+# Build a straight comparison dataframe (loads workbook ONCE)
 # ---------------------------------------------------------------------------
 
 def _safe_float(x):
@@ -182,13 +210,13 @@ def build_straight_comparison_df(
     Returns (df, ordered_case_labels).
 
     df columns:
-      CaseType, Contingency, ResultingIssue, <case_label_1>, <case_label_2>, ...
+      CaseType, Contingency, ResultingIssue, Limit, <case_label_1>, <case_label_2>, ...
 
     Threshold:
       keep rows where max across cases >= threshold.
     """
     if not sheet_names:
-        return pd.DataFrame(columns=["CaseType", "Contingency", "ResultingIssue"]), []
+        return pd.DataFrame(columns=["CaseType", "Contingency", "ResultingIssue", "Limit"]), []
 
     # Create short-but-unique labels for column headers
     used: set[str] = set()
@@ -212,7 +240,7 @@ def build_straight_comparison_df(
     # Load workbook ONCE (huge speedup)
     wb = load_workbook(workbook_path, read_only=True, data_only=True)
 
-    master = None
+    master: Optional[pd.DataFrame] = None
 
     for sheet_name, col_label in zip(sheet_names, labels):
         if sheet_name not in wb.sheetnames:
@@ -227,27 +255,49 @@ def build_straight_comparison_df(
         df = df.rename(columns={"CTGLabel": "Contingency", "LimViolID": "ResultingIssue"})
         df[col_label] = df["LimViolPct"].apply(_safe_float)
 
-        # Collapse duplicates by max within this scenario
+        # Keep limit as a display value (can be numeric or text)
+        df["Limit"] = df.get("LimViolLimit")
+
+        # Collapse duplicates by max pct within this scenario.
+        # For Limit, take the first non-blank value encountered.
+        def _first_nonblank(s: pd.Series):
+            for v in s.tolist():
+                if v is None:
+                    continue
+                if isinstance(v, float) and math.isnan(v):
+                    continue
+                if isinstance(v, str) and v.strip() == "":
+                    continue
+                return v
+            return None
+
         df = (
-            df.groupby(["CaseTypePretty", "Contingency", "ResultingIssue"], as_index=False)[col_label]
-            .max()
+            df.groupby(["CaseTypePretty", "Contingency", "ResultingIssue"], as_index=False)
+              .agg({"Limit": _first_nonblank, col_label: "max"})
         )
 
         if master is None:
             master = df
         else:
-            master = pd.merge(
+            merged = pd.merge(
                 master,
                 df,
                 on=["CaseTypePretty", "Contingency", "ResultingIssue"],
                 how="outer",
+                suffixes=("", "__new"),
             )
+            # Combine limits (prefer existing, else new)
+            if "Limit__new" in merged.columns:
+                merged["Limit"] = merged.get("Limit").combine_first(merged.get("Limit__new"))
+                merged = merged.drop(columns=["Limit__new"])
+            master = merged
 
     if master is None or master.empty:
-        out = pd.DataFrame(columns=["CaseType", "Contingency", "ResultingIssue"] + labels)
+        out = pd.DataFrame(columns=["CaseType", "Contingency", "ResultingIssue", "Limit"] + labels)
         return out, labels
 
     master = master.rename(columns={"CaseTypePretty": "CaseType"})
+
     case_cols = [c for c in labels if c in master.columns]
 
     if case_cols:
@@ -259,11 +309,12 @@ def build_straight_comparison_df(
             by=["CaseType", "_SortKey"], ascending=[True, False], na_position="last"
         ).drop(columns=["_SortKey"])
 
+    # Ensure every requested label exists
     for c in labels:
         if c not in master.columns:
             master[c] = None
 
-    master = master[["CaseType", "Contingency", "ResultingIssue"] + labels].copy()
+    master = master[["CaseType", "Contingency", "ResultingIssue", "Limit"] + labels].copy()
     return master, labels
 
 
@@ -288,10 +339,13 @@ CELL_ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=
 
 
 def _apply_table_styles(ws: Worksheet, num_cases: int):
-    ws.column_dimensions[get_column_letter(2)].width = 45  # B
-    ws.column_dimensions[get_column_letter(3)].width = 45  # C
+    ws.column_dimensions[get_column_letter(2)].width = 45  # B: Contingency
+    ws.column_dimensions[get_column_letter(3)].width = 45  # C: Issue
+    ws.column_dimensions[get_column_letter(4)].width = 15  # D: Limit
+
+    # Scenario % columns start at E now
     for i in range(num_cases):
-        ws.column_dimensions[get_column_letter(4 + i)].width = 12
+        ws.column_dimensions[get_column_letter(5 + i)].width = 12
 
     try:
         ws.sheet_properties.outlinePr.summaryBelow = False
@@ -316,7 +370,7 @@ def _write_title_row(ws: Worksheet, row: int, title: str, last_col: int):
 
 
 def _write_header_row(ws: Worksheet, row: int, case_labels: Sequence[str]):
-    headers = ["Contingency Events", "Resulting Issue"] + list(case_labels)
+    headers = ["Contingency Events", "Resulting Issue", "Limit"] + list(case_labels)
     for col_offset, header in enumerate(headers):
         cell = ws.cell(row=row, column=2 + col_offset)
         cell.value = header
@@ -358,7 +412,8 @@ def _write_row(
         else:
             cell.alignment = Alignment(horizontal="right", vertical="top")
 
-        if col_offset >= 2 and isinstance(val, (float, int)):
+        # Case % columns are now offsets >= 3
+        if col_offset >= 3 and isinstance(val, (float, int)):
             cell.number_format = "0.00"
 
     try:
@@ -400,7 +455,9 @@ def write_formatted_straight_sheet(
 
     current_row = 2
     case_cols = list(case_labels)
-    last_col = 2 + 1 + len(case_cols)
+
+    # Columns: B..(D + num_cases)  => last_col = 4 + num_cases
+    last_col = 4 + len(case_cols)
 
     for case_type_pretty in ["ACCA LongTerm", "ACCA", "DCwAC"]:
         sub = df[df["CaseType"] == case_type_pretty].copy()
@@ -416,7 +473,8 @@ def write_formatted_straight_sheet(
             for _, r in sub.iterrows():
                 cont = str(r.get("Contingency", "") or "")
                 issue = str(r.get("ResultingIssue", "") or "")
-                vals = [cont, issue] + [r.get(c, None) for c in case_cols]
+                limit = r.get("Limit", None)
+                vals = [cont, issue, limit] + [r.get(c, None) for c in case_cols]
                 _write_row(ws, current_row, vals)
                 current_row += 1
             current_row += 1
@@ -440,7 +498,9 @@ def write_formatted_straight_sheet(
                 cont = str(r.get("Contingency", "") or "")
                 issue = str(r.get("ResultingIssue", "") or "")
                 issue_display = issue if first else ""
-                vals = [cont, issue_display] + [r.get(c, None) for c in case_cols]
+                limit = r.get("Limit", None)
+
+                vals = [cont, issue_display, limit] + [r.get(c, None) for c in case_cols]
 
                 if first:
                     summary_row_index = current_row
