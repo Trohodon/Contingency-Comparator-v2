@@ -7,6 +7,11 @@
 # - Expandable issue view uses Excel outline (+/-)
 # - Summary row is ABOVE detail rows (so +/- appears at the TOP like your "left" workbook)
 # - The first (max) row per Resulting Issue is bolded to stand out
+#
+# UPDATED (Limit column):
+# - Adds a "Limit" column (associated with Resulting Issue) in column D.
+# - Output columns now:
+#     B Contingency Events | C Resulting Issue | D Limit | E Left % | F Right % | G Δ% / Status
 
 from __future__ import annotations
 
@@ -23,15 +28,14 @@ from openpyxl.utils import get_column_letter
 # ===== Formatting helpers ====================================================
 
 def apply_table_styles(ws: Worksheet):
-    """
-    Set reasonable column widths and outline settings for a formatted comparison sheet.
-    """
+    """Set reasonable column widths and outline settings for a formatted comparison sheet."""
     widths = {
         2: 45,  # B: Contingency Events
         3: 45,  # C: Resulting Issue
-        4: 15,  # D: Left %
-        5: 15,  # E: Right %
-        6: 22,  # F: Delta / Status
+        4: 15,  # D: Limit
+        5: 15,  # E: Left %
+        6: 15,  # F: Right %
+        7: 22,  # G: Delta / Status
     }
     for col_idx, width in widths.items():
         ws.column_dimensions[get_column_letter(col_idx)].width = width
@@ -80,12 +84,7 @@ def _max_pct(left: Optional[float], right: Optional[float]) -> float:
 
 
 def _normalize_issue_series(series: pd.Series) -> pd.Series:
-    """
-    Forward-fill blanks so that blank ResultingIssue inherits the issue above.
-
-    Avoid pandas Series.replace(...) due to pandas version quirks that can throw:
-      "'regex' must be a string ... you passed a 'bool'"
-    """
+    """Forward-fill blanks so blank ResultingIssue inherits the issue above."""
     s = series.copy()
 
     def is_blank(v) -> bool:
@@ -100,11 +99,11 @@ def _normalize_issue_series(series: pd.Series) -> pd.Series:
     mask = s.apply(is_blank)
     s = s.mask(mask)
     s = s.ffill()
-    return s.fillna("")
+    return s.fillna("")  # final safety
 
 
 def _write_title_row(ws: Worksheet, row: int, title: str):
-    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=6)
+    ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=7)  # B..G
     cell = ws.cell(row=row, column=2)
     cell.value = title
     cell.fill = TITLE_FILL
@@ -116,6 +115,7 @@ def _write_header_row(ws: Worksheet, row: int):
     headers = [
         "Contingency Events",
         "Resulting Issue",
+        "Limit",
         "Left %",
         "Right %",
         "Δ% (Right - Left) / Status",
@@ -134,6 +134,7 @@ def _write_data_row(
     row: int,
     cont: str,
     issue: str,
+    limit,
     left_pct,
     right_pct,
     delta,
@@ -142,14 +143,13 @@ def _write_data_row(
     hidden: bool = False,
     bold: bool = False,
 ):
-    values = [cont, issue, left_pct, right_pct, delta]
+    values = [cont, issue, limit, left_pct, right_pct, delta]
 
     for col_offset, val in enumerate(values):
         cell = ws.cell(row=row, column=2 + col_offset)
         cell.value = val
         cell.border = THIN_BORDER
 
-        # Bold summary/max row for readability
         if bold:
             base = cell.font or Font()
             cell.font = Font(
@@ -163,12 +163,15 @@ def _write_data_row(
                 color=base.color,
             )
 
+        # Align
         if col_offset in (0, 1):
             cell.alignment = CELL_ALIGN_WRAP
         else:
             cell.alignment = Alignment(horizontal="right", vertical="top")
 
-        if col_offset in (2, 3) and isinstance(val, (float, int)):
+        # Number formats
+        # Left/Right are now offsets 3 and 4
+        if col_offset in (3, 4) and isinstance(val, (float, int)):
             cell.number_format = "0.00"
 
     # Outline / hidden controls (Excel +/-)
@@ -186,17 +189,7 @@ def write_formatted_pair_sheet(
     *,
     expandable_issue_view: bool = True,
 ):
-    """
-    Create one sheet in the batch workbook using the blue-block style.
-
-    If expandable_issue_view=True:
-      - groups within each CaseType block by ResultingIssue
-      - sorts each issue group by max(LeftPct, RightPct) desc
-      - keeps the top row visible + bolded, hides the rest (outlineLevel=1)
-      - blanks ResultingIssue on hidden rows for readability
-      - outline summary is ABOVE details (summaryBelow=False), so +/- appears at top
-      - marks the summary row as collapsed so Excel shows the + correctly
-    """
+    """Create one sheet in the batch workbook using the blue-block style."""
     ws = wb.create_sheet(title=ws_name)
     apply_table_styles(ws)
 
@@ -226,6 +219,7 @@ def write_formatted_pair_sheet(
             for _, r in sub.iterrows():
                 cont = str(r.get("Contingency", "") or "")
                 issue = str(r.get("ResultingIssue", "") or "")
+                limit = r.get("Limit", None)
                 left_pct = r.get("LeftPct", None)
                 right_pct = r.get("RightPct", None)
                 delta = str(r.get("DeltaDisplay", "") or "")
@@ -235,6 +229,7 @@ def write_formatted_pair_sheet(
                     current_row,
                     cont,
                     issue,
+                    limit,
                     left_pct,
                     right_pct,
                     delta,
@@ -253,11 +248,7 @@ def write_formatted_pair_sheet(
             axis=1,
         )
 
-        group_max = (
-            sub.groupby("ResultingIssue")["_SortKey"]
-            .max()
-            .sort_values(ascending=False)
-        )
+        group_max = sub.groupby("ResultingIssue")["_SortKey"].max().sort_values(ascending=False)
         ordered_issues = list(group_max.index)
 
         for issue_key in ordered_issues:
@@ -274,9 +265,10 @@ def write_formatted_pair_sheet(
                 cont = str(r.get("Contingency", "") or "")
                 issue = str(r.get("ResultingIssue", "") or "")
 
-                # Blank issue text for the hidden (detail) rows
+                # Blank issue text for hidden detail rows (readability)
                 issue_display = issue if first else ""
 
+                limit = r.get("Limit", None)
                 left_pct = r.get("LeftPct", None)
                 right_pct = r.get("RightPct", None)
                 delta = str(r.get("DeltaDisplay", "") or "")
@@ -289,6 +281,7 @@ def write_formatted_pair_sheet(
                     current_row,
                     cont,
                     issue_display,
+                    limit,
                     left_pct,
                     right_pct,
                     delta,
