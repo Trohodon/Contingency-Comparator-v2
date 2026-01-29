@@ -29,6 +29,32 @@ def _to_float_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
+def _as_float(x):
+    """Best-effort convert to float; returns None if not numeric."""
+    try:
+        if x is None:
+            return None
+        if isinstance(x, float) and pd.isna(x):
+            return None
+        # handle "123.4%" strings
+        if isinstance(x, str):
+            s = x.strip().replace("%", "")
+            if s == "":
+                return None
+            return float(s)
+        return float(x)
+    except Exception:
+        return None
+
+
+def _round1_if_numeric(x):
+    """Round numeric values to 1 decimal, otherwise return original."""
+    v = _as_float(x)
+    if v is None:
+        return x
+    return round(v, 1)
+
+
 def _build_simple_workbook(root_folder, folder_to_case_csvs, log_func=None):
     """
     Fallback: simple one-sheet-per-scenario workbook, no fancy formatting,
@@ -194,7 +220,6 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
             pretty_name = PRETTY_CASE_NAMES.get(label, label)
 
             # ===== Title row =====
-            # FIX: merge through column F (6) now that we have 5 data cols B-F
             ws.merge_cells(start_row=current_row, start_column=2, end_row=current_row, end_column=6)
             c = ws.cell(row=current_row, column=2)
             c.value = pretty_name
@@ -206,7 +231,6 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
             current_row += 1
 
             # ===== Header row =====
-            # FIX: you were missing a comma after ("D","Limit")
             headers = [
                 ("B", "Contingency Events"),
                 ("C", "Resulting Issue"),
@@ -280,9 +304,19 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
 
                     ws.cell(row=current_row, column=2).value = getattr(r0, "CTGLabel", "")
                     ws.cell(row=current_row, column=3).value = getattr(r0, "LimViolID", "")
-                    ws.cell(row=current_row, column=4).value = getattr(r0, "LimViolLimit", "")
-                    ws.cell(row=current_row, column=5).value = getattr(r0, "LimViolValue", "")
-                    ws.cell(row=current_row, column=6).value = getattr(r0, "LimViolPct", "")
+
+                    lim_cell = ws.cell(row=current_row, column=4)
+                    val_cell = ws.cell(row=current_row, column=5)
+                    pct_cell = ws.cell(row=current_row, column=6)
+
+                    lim_cell.value = _round1_if_numeric(getattr(r0, "LimViolLimit", ""))
+                    val_cell.value = _round1_if_numeric(getattr(r0, "LimViolValue", ""))
+                    pct_cell.value = _round1_if_numeric(getattr(r0, "LimViolPct", ""))
+
+                    # Force 1-decimal display when numeric
+                    lim_cell.number_format = "0.0"
+                    val_cell.number_format = "0.0"
+                    pct_cell.number_format = "0.0"
 
                     for col in range(2, 7):
                         cell = ws.cell(row=current_row, column=col)
@@ -303,9 +337,18 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
 
                         ws.cell(row=current_row, column=2).value = getattr(r, "CTGLabel", "")
                         ws.cell(row=current_row, column=3).value = ""
-                        ws.cell(row=current_row, column=4).value = getattr(r, "LimViolLimit", "")
-                        ws.cell(row=current_row, column=5).value = getattr(r, "LimViolValue", "")
-                        ws.cell(row=current_row, column=6).value = getattr(r, "LimViolPct", "")
+
+                        lim_cell = ws.cell(row=current_row, column=4)
+                        val_cell = ws.cell(row=current_row, column=5)
+                        pct_cell = ws.cell(row=current_row, column=6)
+
+                        lim_cell.value = _round1_if_numeric(getattr(r, "LimViolLimit", ""))
+                        val_cell.value = _round1_if_numeric(getattr(r, "LimViolValue", ""))
+                        pct_cell.value = _round1_if_numeric(getattr(r, "LimViolPct", ""))
+
+                        lim_cell.number_format = "0.0"
+                        val_cell.number_format = "0.0"
+                        pct_cell.number_format = "0.0"
 
                         for col in range(2, 7):
                             cell = ws.cell(row=current_row, column=col)
@@ -330,9 +373,18 @@ def build_workbook(root_folder, folder_to_case_csvs, group_details: bool = True,
                 for _, row in block_df.iterrows():
                     ws.cell(row=current_row, column=2).value = row.get("CTGLabel", "")
                     ws.cell(row=current_row, column=3).value = row.get("LimViolID", "") if has_limviolid else ""
-                    ws.cell(row=current_row, column=4).value = row.get("LimViolLimit", "")
-                    ws.cell(row=current_row, column=5).value = row.get("LimViolValue", "")
-                    ws.cell(row=current_row, column=6).value = row.get("LimViolPct", "")
+
+                    lim_cell = ws.cell(row=current_row, column=4)
+                    val_cell = ws.cell(row=current_row, column=5)
+                    pct_cell = ws.cell(row=current_row, column=6)
+
+                    lim_cell.value = _round1_if_numeric(row.get("LimViolLimit", ""))
+                    val_cell.value = _round1_if_numeric(row.get("LimViolValue", ""))
+                    pct_cell.value = _round1_if_numeric(row.get("LimViolPct", ""))
+
+                    lim_cell.number_format = "0.0"
+                    val_cell.number_format = "0.0"
+                    pct_cell.number_format = "0.0"
 
                     for col in range(2, 7):
                         cell = ws.cell(row=current_row, column=col)
