@@ -1,13 +1,16 @@
 # gui/help_view.py
 #
 # Help tab with:
-#  - Left topic navigation + search box
-#  - Right styled content
-#  - Search ranks topics (core/help_search.py)
+#  - Left topic nav + search box
+#  - Ranked search (core/help_search.py)
+#  - Enter opens best match + highlights hits
+
+from __future__ import annotations
 
 import os
 import sys
 import subprocess
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -15,22 +18,9 @@ from core.help_search import rank_topics, probe
 
 
 class HelpTab(ttk.Frame):
-    """
-    Professional Help / Documentation tab.
-
-    Left = topic navigation + search
-    Right = styled content
-
-    Search behavior:
-      - Type in search box -> ranks topics by relevance (title + content)
-      - Press Enter -> opens top match
-      - Secret trigger: typing "Menu One" then Enter opens Menu One
-    """
-
     # Palette
     NAVY = "#0B2F5B"
     NAVY_2 = "#103A6B"
-    LIGHT_BG = "#F4F7FB"
     CARD_BG = "#FFFFFF"
     CALLOUT_BG = "#EAF2FF"
     CODE_BG = "#F2F2F2"
@@ -42,7 +32,8 @@ class HelpTab(ttk.Frame):
     def __init__(self, master):
         super().__init__(master)
         self._current_topic = "Overview"
-        self._topics_master = []
+        self._topics_master: list[str] = []
+        self._egg_lock_path = self._get_lock_path()
         self._build_gui()
 
     # ---------------- GUI ---------------- #
@@ -105,7 +96,7 @@ class HelpTab(ttk.Frame):
         self.topic_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
         self.topic_list.bind("<<ListboxSelect>>", self._on_topic_selected)
 
-        # Topics
+        # Updated topics
         self._topics = [
             "Overview",
             "Files you need",
@@ -149,11 +140,8 @@ class HelpTab(ttk.Frame):
         btns = ttk.Frame(header)
         btns.grid(row=0, column=1, sticky="e", padx=(10, 12))
 
-        self.copy_btn = ttk.Button(btns, text="Copy section", command=self._copy_section)
-        self.copy_btn.pack(side=tk.LEFT, padx=(0, 8))
-
-        self.copy_all_btn = ttk.Button(btns, text="Copy all help", command=self._copy_all)
-        self.copy_all_btn.pack(side=tk.LEFT)
+        ttk.Button(btns, text="Copy section", command=self._copy_section).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btns, text="Copy all help", command=self._copy_all).pack(side=tk.LEFT)
 
         # Content "card"
         card = tk.Frame(right, bg=self.CARD_BG, bd=1, relief="solid")
@@ -192,9 +180,7 @@ class HelpTab(ttk.Frame):
         ).grid(row=0, column=0, sticky="w")
 
         # Select first topic + render
-        self.topic_list.selection_clear(0, tk.END)
-        self.topic_list.selection_set(0)
-        self.topic_list.activate(0)
+        self._select_topic("Overview")
         self._render_topic("Overview")
 
     def _configure_text_tags(self):
@@ -238,8 +224,6 @@ class HelpTab(ttk.Frame):
         )
 
         self.text.tag_configure("divider", foreground=self.DIVIDER)
-
-        # highlight hits after search-open
         self.text.tag_configure("hit", background=self.HILITE_BG)
 
         # make read-only but selectable
@@ -270,9 +254,10 @@ class HelpTab(ttk.Frame):
                 ("h2", "Recent updates you should know"),
                 ("bullet", "Expandable +/- issue grouping uses Excel outline (summary row ABOVE details)"),
                 ("bullet", "Batch workbook can be built with ONLY Straight Comparison (empty queue)"),
-                ("bullet", "Limit / MVA / % fields can be rounded to 1 decimal (when enabled)"),
+                ("bullet", "Limit / MVA / % fields can be rounded to 1 decimal (when enabled in the build step)"),
                 ("callout", "Sharing tip: send coworkers the Batch workbook—it's self-contained."),
             ],
+
             "Files you need": [
                 ("h1", "Files you need"),
                 ("h2", "Inputs"),
@@ -285,6 +270,7 @@ class HelpTab(ttk.Frame):
                 ("bullet", "Batch comparison workbook (.xlsx) with pair sheets + Straight Comparison"),
                 ("callout", "If Excel has a file open, Windows may lock it. Close Excel before rerunning."),
             ],
+
             "Recommended folder setup": [
                 ("h1", "Recommended folder setup"),
                 ("p", "Keeping a clean folder structure makes runs faster and outputs easier to find."),
@@ -296,6 +282,7 @@ class HelpTab(ttk.Frame):
                 ("bullet", "Reduces accidental exports into random locations"),
                 ("callout", "Best practice: one working folder per study."),
             ],
+
             "Quick start: Case Processing": [
                 ("h1", "Quick start: Case Processing"),
                 ("callout", "Goal: produce clean, consistent filtered exports for comparison."),
@@ -308,6 +295,7 @@ class HelpTab(ttk.Frame):
                 ("bullet", "SimAuto export requires PowerWorld installed and available"),
                 ("bullet", "Close CSV/Excel outputs before rerunning (file locks)"),
             ],
+
             "Quick start: Compare Cases": [
                 ("h1", "Quick start: Compare Cases"),
                 ("callout", "Goal: see what got better/worse between two scenarios."),
@@ -323,6 +311,7 @@ class HelpTab(ttk.Frame):
                 ("bullet", "Build queued workbook: exports a new .xlsx with one sheet per pair"),
                 ("callout", "Delta column shows numeric change or 'Only in left/right' when missing on one side."),
             ],
+
             "Straight Comparison (all scenarios)": [
                 ("h1", "Straight Comparison (all scenarios)"),
                 ("p", "This sheet compares ALL original scenario sheets side-by-side (no pair deltas)."),
@@ -335,6 +324,7 @@ class HelpTab(ttk.Frame):
                 ("bullet", "Spot the 'worst anywhere' issues across many scenarios quickly"),
                 ("bullet", "Share a single sheet for broad review"),
             ],
+
             "Batch compare workflow": [
                 ("h1", "Batch compare workflow"),
                 ("callout", "Best way to package results for coworkers."),
@@ -346,6 +336,7 @@ class HelpTab(ttk.Frame):
                 ("h2", "Naming suggestion"),
                 ("code", "Batch_Comparison_<StudyName>.xlsx\nExample: Batch_Comparison_LTWG26W.xlsx"),
             ],
+
             "How the +/- grouping works": [
                 ("h1", "How the +/- grouping works"),
                 ("p", "The outline dropdown is Excel's row grouping feature."),
@@ -356,6 +347,7 @@ class HelpTab(ttk.Frame):
                 ("bullet", "Summary row is ABOVE details so the +/- appears at the top row (cleaner)"),
                 ("callout", "If you don't want grouping, turn off the 'expandable issue view' option."),
             ],
+
             "Performance tips": [
                 ("h1", "Performance tips"),
                 ("h2", "Best practices"),
@@ -364,6 +356,7 @@ class HelpTab(ttk.Frame):
                 ("bullet", "Batch in chunks if you have hundreds of pairs"),
                 ("callout", "The UI may look briefly 'stuck' during heavy Excel I/O — that’s normal."),
             ],
+
             "Troubleshooting": [
                 ("h1", "Troubleshooting"),
                 ("h2", "File locked / permission denied"),
@@ -376,11 +369,12 @@ class HelpTab(ttk.Frame):
                 ("bullet", "Confirm PowerWorld is installed and SimAuto is available."),
                 ("callout", "If you're stuck: copy the Compare Log and send it to the tool owner."),
             ],
+
             "Version / Contact": [
                 ("h1", "Version / Contact"),
                 ("p", "Tool name: Contingency Comparator"),
                 ("p", "Purpose: PowerWorld ViolationCTG export + compare"),
-                ("p", "Version: v1.1.1"),
+                ("p", "Version: v2.x"),
                 ("code", "Team: Transmission Planning\nNotes: TBD"),
             ],
         }
@@ -391,7 +385,7 @@ class HelpTab(ttk.Frame):
         q = self.search_var.get().strip()
         sections = self._get_sections()
 
-        # Secret trigger should be Enter-only, not while typing
+        # secret trigger should fire only on Enter, not while typing
         if not q:
             self._set_topic_list(self._topics_master)
             return
@@ -399,21 +393,20 @@ class HelpTab(ttk.Frame):
         ranked = rank_topics(q, sections, limit=50)
         ordered = [r.topic for r in ranked]
 
-        # If ranking returns nothing, fall back to substring filter on titles
+        # fallback: substring filter on titles
         if not ordered:
             q_low = q.lower()
             ordered = [t for t in self._topics_master if q_low in t.lower()]
 
-        # Keep only topics we actually display (defensive)
         ordered = [t for t in ordered if t in self._topics_master]
         self._set_topic_list(ordered if ordered else self._topics_master)
 
     def _on_search_enter(self, _event=None):
         q = self.search_var.get().strip()
 
-        # Secret trigger: only fires on Enter
+        # secret trigger: only fires on Enter
         if probe(q):
-            self._launch_menu_one()
+            self._launch_hidden_tool_single_instance()
             return
 
         sections = self._get_sections()
@@ -424,7 +417,6 @@ class HelpTab(ttk.Frame):
             self._render_topic(topic)
             self._highlight_query_hits(q)
         else:
-            # If nothing, just highlight in current topic
             self._highlight_query_hits(q)
 
     def _set_topic_list(self, topics):
@@ -446,25 +438,106 @@ class HelpTab(ttk.Frame):
                 self.topic_list.see(i)
                 return
 
-    def _launch_menu_one(self):
+    # ---------------- Easter egg launcher ---------------- #
+
+    def _get_lock_path(self) -> str:
         """
-        Launch Menu One in a separate process.
-        - In EXE (frozen): relaunch this EXE with --menu-one
-        - In VS (python): run python main.py --menu-one
+        Path for a simple cross-process lock file.
+        Put it in %TEMP% so it works in VS runs AND in frozen EXE.
+        """
+        tmp = os.environ.get("TEMP") or os.environ.get("TMP") or os.path.expanduser("~")
+        return os.path.join(tmp, "dcc_help_cache.lock")
+
+    def _acquire_lock(self) -> bool:
+        """
+        Try to create a lock file exclusively.
+        If it already exists, assume the hidden tool is launching/running.
+        """
+        try:
+            # O_EXCL makes creation atomic across processes
+            fd = os.open(self._egg_lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+            return True
+        except FileExistsError:
+            return False
+        except Exception:
+            # If anything weird happens, do not block launch
+            return True
+
+    def _release_lock_later(self, seconds: float = 2.5):
+        """
+        Release lock after a short delay.
+        This prevents "Enter spam" from launching multiple instances while startup is slow.
+        """
+        def _do_release():
+            try:
+                if os.path.exists(self._egg_lock_path):
+                    os.remove(self._egg_lock_path)
+            except Exception:
+                pass
+
+        # schedule using Tk so we don't block UI
+        ms = int(max(500, seconds * 1000))
+        self.after(ms, _do_release)
+
+    def _launch_hidden_tool_single_instance(self):
+        """
+        Single-instance guarded launcher.
+        If lock exists, we assume it is already launching/running and ignore repeats.
+        """
+        got_lock = self._acquire_lock()
+        if not got_lock:
+            return  # already launching/running (or recently triggered)
+
+        try:
+            self._launch_hidden_tool()
+        finally:
+            # Release after a moment (enough to stop multiple Enter presses)
+            self._release_lock_later(3.0)
+
+    def _launch_hidden_tool(self):
+        """
+        EXE-safe launch strategy:
+
+        - Frozen EXE:
+            Relaunch the same EXE with a flag: --menu-one
+
+        - Normal python run:
+            Relaunch the entry script you actually used (sys.argv[0]) with --menu-one
+            This avoids hard-coding main.py and fixes your "could not find ... main.py" error.
         """
         try:
             root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
             is_frozen = bool(getattr(sys, "frozen", False))
 
             if is_frozen:
+                # Relaunch the packaged executable
                 cmd = [sys.executable, "--menu-one"]
-            else:
-                main_py = os.path.join(root_dir, "main.py")
-                if not os.path.isfile(main_py):
-                    messagebox.showerror("Missing", f"Could not find:\n{main_py}")
-                    return
-                cmd = [sys.executable, main_py, "--menu-one"]
+                subprocess.Popen(cmd, cwd=root_dir)
+                return
 
+            # Normal python: relaunch whatever script started the app
+            entry = os.path.abspath(sys.argv[0])
+
+            # If argv[0] is not a .py or doesn't exist, try common candidates
+            if not entry.lower().endswith(".py") or not os.path.isfile(entry):
+                candidates = [
+                    os.path.join(root_dir, "ContingencyComparaterV2.py"),
+                    os.path.join(root_dir, "main.py"),
+                ]
+                entry = next((p for p in candidates if os.path.isfile(p)), "")
+
+            if not entry or not os.path.isfile(entry):
+                messagebox.showerror(
+                    "Missing",
+                    "Could not locate the entry script to relaunch.\n\n"
+                    "Expected something like:\n"
+                    f"  {os.path.join(root_dir, 'ContingencyComparaterV2.py')}"
+                )
+                return
+
+            cmd = [sys.executable, entry, "--menu-one"]
             subprocess.Popen(cmd, cwd=root_dir)
 
         except Exception as e:
@@ -505,7 +578,6 @@ class HelpTab(ttk.Frame):
 
             self.text.insert(tk.END, "\n")
 
-        # subtle divider line at end
         self.text.insert(tk.END, "────────────────────────────────────────\n")
         self.text.tag_add("divider", "end-2l", "end-1l")
 
@@ -514,7 +586,7 @@ class HelpTab(ttk.Frame):
 
     def _highlight_query_hits(self, query: str):
         """
-        Highlight each query token in the displayed text.
+        Simple visible highlight: highlight each query token in the displayed text.
         """
         q = (query or "").strip()
         if not q:
