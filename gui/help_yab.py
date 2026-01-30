@@ -1,10 +1,17 @@
 # gui/help_view.py
+#
+# Help tab with:
+#  - Left topic navigation + search box
+#  - Right styled content
+#  - Search ranks topics (core/help_search.py)
 
+import os
+import sys
+import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from core.help_search import rank_topics, probe
-from core.menu_one_runner import launch_menu_one_detached
 
 
 class HelpTab(ttk.Frame):
@@ -17,12 +24,13 @@ class HelpTab(ttk.Frame):
     Search behavior:
       - Type in search box -> ranks topics by relevance (title + content)
       - Press Enter -> opens top match
-      - Secret trigger: "Menu One" opens Menu One easter egg (single-instance)
+      - Secret trigger: typing "Menu One" then Enter opens Menu One
     """
 
     # Palette
     NAVY = "#0B2F5B"
     NAVY_2 = "#103A6B"
+    LIGHT_BG = "#F4F7FB"
     CARD_BG = "#FFFFFF"
     CALLOUT_BG = "#EAF2FF"
     CODE_BG = "#F2F2F2"
@@ -35,7 +43,6 @@ class HelpTab(ttk.Frame):
         super().__init__(master)
         self._current_topic = "Overview"
         self._topics_master = []
-        self._menu_launching = False  # prevents spam in this GUI process
         self._build_gui()
 
     # ---------------- GUI ---------------- #
@@ -98,7 +105,7 @@ class HelpTab(ttk.Frame):
         self.topic_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
         self.topic_list.bind("<<ListboxSelect>>", self._on_topic_selected)
 
-        # Updated topics
+        # Topics
         self._topics = [
             "Overview",
             "Files you need",
@@ -173,6 +180,7 @@ class HelpTab(ttk.Frame):
 
         self._configure_text_tags()
 
+        # Footer hint
         footer = ttk.Frame(right)
         footer.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         footer.columnconfigure(0, weight=1)
@@ -230,7 +238,11 @@ class HelpTab(ttk.Frame):
         )
 
         self.text.tag_configure("divider", foreground=self.DIVIDER)
+
+        # highlight hits after search-open
         self.text.tag_configure("hit", background=self.HILITE_BG)
+
+        # make read-only but selectable
         self.text.configure(state="disabled")
 
     # ---------------- Content model ---------------- #
@@ -258,7 +270,7 @@ class HelpTab(ttk.Frame):
                 ("h2", "Recent updates you should know"),
                 ("bullet", "Expandable +/- issue grouping uses Excel outline (summary row ABOVE details)"),
                 ("bullet", "Batch workbook can be built with ONLY Straight Comparison (empty queue)"),
-                ("bullet", "Limit / MVA / % fields can be rounded to 1 decimal (when enabled in the build step)"),
+                ("bullet", "Limit / MVA / % fields can be rounded to 1 decimal (when enabled)"),
                 ("callout", "Sharing tip: send coworkers the Batch workbook—it's self-contained."),
             ],
             "Files you need": [
@@ -368,9 +380,8 @@ class HelpTab(ttk.Frame):
                 ("h1", "Version / Contact"),
                 ("p", "Tool name: Contingency Comparator"),
                 ("p", "Purpose: PowerWorld ViolationCTG export + compare"),
-                ("p", "Version: v2.x"),
-                ("h2", "Owner"),
-                ("code", "Name: <your name>\nTeam: <your team>\nNotes: <anything coworkers should know>"),
+                ("p", "Version: v1.1.1"),
+                ("code", "Team: Transmission Planning\nNotes: TBD"),
             ],
         }
 
@@ -380,6 +391,7 @@ class HelpTab(ttk.Frame):
         q = self.search_var.get().strip()
         sections = self._get_sections()
 
+        # Secret trigger should be Enter-only, not while typing
         if not q:
             self._set_topic_list(self._topics_master)
             return
@@ -387,17 +399,19 @@ class HelpTab(ttk.Frame):
         ranked = rank_topics(q, sections, limit=50)
         ordered = [r.topic for r in ranked]
 
+        # If ranking returns nothing, fall back to substring filter on titles
         if not ordered:
             q_low = q.lower()
             ordered = [t for t in self._topics_master if q_low in t.lower()]
 
+        # Keep only topics we actually display (defensive)
         ordered = [t for t in ordered if t in self._topics_master]
         self._set_topic_list(ordered if ordered else self._topics_master)
 
     def _on_search_enter(self, _event=None):
         q = self.search_var.get().strip()
 
-        # secret trigger: only fires on Enter
+        # Secret trigger: only fires on Enter
         if probe(q):
             self._launch_menu_one()
             return
@@ -410,6 +424,7 @@ class HelpTab(ttk.Frame):
             self._render_topic(topic)
             self._highlight_query_hits(q)
         else:
+            # If nothing, just highlight in current topic
             self._highlight_query_hits(q)
 
     def _set_topic_list(self, topics):
@@ -432,32 +447,28 @@ class HelpTab(ttk.Frame):
                 return
 
     def _launch_menu_one(self):
-    """
-    Launch Menu One in a separate process.
-    - In EXE (frozen): relaunch this EXE with --menu-one
-    - In VS (python): run python main.py --menu-one
-    """
-    try:
-        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        """
+        Launch Menu One in a separate process.
+        - In EXE (frozen): relaunch this EXE with --menu-one
+        - In VS (python): run python main.py --menu-one
+        """
+        try:
+            root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            is_frozen = bool(getattr(sys, "frozen", False))
 
-        is_frozen = bool(getattr(sys, "frozen", False))
+            if is_frozen:
+                cmd = [sys.executable, "--menu-one"]
+            else:
+                main_py = os.path.join(root_dir, "main.py")
+                if not os.path.isfile(main_py):
+                    messagebox.showerror("Missing", f"Could not find:\n{main_py}")
+                    return
+                cmd = [sys.executable, main_py, "--menu-one"]
 
-        if is_frozen:
-            # sys.executable == the built EXE
-            cmd = [sys.executable, "--menu-one"]
-        else:
-            # sys.executable == python.exe, so we must pass the script
-            main_py = os.path.join(root_dir, "main.py")
-            if not os.path.isfile(main_py):
-                messagebox.showerror("Missing", f"Could not find:\n{main_py}")
-                return
-            cmd = [sys.executable, main_py, "--menu-one"]
+            subprocess.Popen(cmd, cwd=root_dir)
 
-        subprocess.Popen(cmd, cwd=root_dir)
-
-    except Exception as e:
-        messagebox.showerror("Launch failed", str(e))
-
+        except Exception as e:
+            messagebox.showerror("Launch failed", str(e))
 
     # ---------------- Rendering ---------------- #
 
@@ -494,6 +505,7 @@ class HelpTab(ttk.Frame):
 
             self.text.insert(tk.END, "\n")
 
+        # subtle divider line at end
         self.text.insert(tk.END, "────────────────────────────────────────\n")
         self.text.tag_add("divider", "end-2l", "end-1l")
 
@@ -501,6 +513,9 @@ class HelpTab(ttk.Frame):
         self.text.yview_moveto(0.0)
 
     def _highlight_query_hits(self, query: str):
+        """
+        Highlight each query token in the displayed text.
+        """
         q = (query or "").strip()
         if not q:
             return
