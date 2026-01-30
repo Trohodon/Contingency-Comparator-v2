@@ -1,4 +1,3 @@
-# main.py
 from __future__ import annotations
 
 import os
@@ -34,6 +33,18 @@ def _set_app_icon(root: tk.Tk):
             pass
 
 
+def _pyi_splash_update(text: str):
+    # Optional: update the splash text if you want
+    try:
+        import pyi_splash  # type: ignore
+        try:
+            pyi_splash.update_text(text)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _close_pyinstaller_splash():
     try:
         import pyi_splash  # type: ignore
@@ -44,7 +55,7 @@ def _close_pyinstaller_splash():
 
 def _show_loading_window(root: tk.Tk) -> tk.Toplevel:
     """
-    Internal loading window (shows after Python starts).
+    This window only shows AFTER Python starts.
     For onefile extraction time, use PyInstaller --splash.
     """
     root.withdraw()
@@ -86,7 +97,7 @@ def _show_loading_window(root: tk.Tk) -> tk.Toplevel:
     bar.grid(row=2, column=0, sticky="ew", padx=18, pady=(14, 12))
     bar.start(12)
 
-    # Use your existing splash.png as the image inside the loading window
+    # Use your existing splash.png as an image inside the loading window (optional)
     try:
         png_path = resource_path(os.path.join("assets", "splash.png"))
         if os.path.exists(png_path):
@@ -109,23 +120,31 @@ def _show_loading_window(root: tk.Tk) -> tk.Toplevel:
 def main():
     _set_windows_appusermodelid()
 
-    # Easter egg mode
     if "--menu-one" in sys.argv:
         _close_pyinstaller_splash()
         from core.menu_one_runner import maybe_run_menu_one_from_argv
         maybe_run_menu_one_from_argv()
         return
 
+    _pyi_splash_update("Starting UI...")
+
     root = tk.Tk()
     _set_app_icon(root)
-    _close_pyinstaller_splash()
 
+    # Show your internal loading window (post-Python start)
     loading = _show_loading_window(root)
+    _pyi_splash_update("Loading modules...")
 
     try:
         from gui.app import App
+
+        _pyi_splash_update("Finalizing...")
         app = App(root)
         app.pack(fill="both", expand=True)
+
+        # IMPORTANT: close the PyInstaller splash ONLY when UI is ready
+        _close_pyinstaller_splash()
+
     finally:
         try:
             loading.destroy()
