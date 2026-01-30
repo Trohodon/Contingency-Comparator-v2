@@ -1,9 +1,12 @@
 # gui/help_view.py
 
+import os
+import sys
+import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from core.help_search import rank_topics
+from core.help_search import rank_topics, probe
 
 
 class HelpTab(ttk.Frame):
@@ -14,9 +17,8 @@ class HelpTab(ttk.Frame):
     Right = styled content
 
     Search behavior:
-      - Type in search box -> filters topics by relevance (title + content)
-      - Press Enter -> auto-opens top match and highlights hits
-      - Highlights matches inside the visible topic
+      - Type in search box -> ranks topics by relevance (title + content)
+      - Press Enter -> opens top match
     """
 
     # Palette
@@ -29,12 +31,12 @@ class HelpTab(ttk.Frame):
     MUTED = "#5C6773"
     TEXT = "#1F2A44"
     DIVIDER = "#D6DFEA"
-    HILITE_BG = "#FFF2A8"  # search highlight
+    HILITE_BG = "#FFF2A8"
 
     def __init__(self, master):
         super().__init__(master)
         self._current_topic = "Overview"
-        self._last_query = ""
+        self._topics_master = []
         self._build_gui()
 
     # ---------------- GUI ---------------- #
@@ -50,7 +52,7 @@ class HelpTab(ttk.Frame):
         nav_card = tk.Frame(outer, bg=self.CARD_BG, bd=1, relief="solid")
         nav_card.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
         nav_card.grid_propagate(False)
-        nav_card.configure(width=240)
+        nav_card.configure(width=260)
 
         nav_header = tk.Frame(nav_card, bg=self.NAVY)
         nav_header.pack(fill=tk.X)
@@ -62,49 +64,28 @@ class HelpTab(ttk.Frame):
             fg="white",
             font=("Segoe UI", 11, "bold"),
             padx=10,
-            pady=8,
+            pady=10,
         ).pack(anchor="w")
 
-        # Search bar (left panel)
-        search_row = tk.Frame(nav_header, bg=self.NAVY)
-        search_row.pack(fill=tk.X, padx=10, pady=(0, 10))
+        # Search box
+        search_wrap = tk.Frame(nav_card, bg=self.CARD_BG)
+        search_wrap.pack(fill=tk.X, padx=10, pady=(10, 6))
+
+        tk.Label(
+            search_wrap,
+            text="Search",
+            bg=self.CARD_BG,
+            fg=self.MUTED,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w")
 
         self.search_var = tk.StringVar(value="")
-        self.search_entry = tk.Entry(
-            search_row,
-            textvariable=self.search_var,
-            font=("Segoe UI", 10),
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=self.NAVY_2,
-            highlightcolor=self.NAVY_2,
-        )
-        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.search_entry = ttk.Entry(search_wrap, textvariable=self.search_var)
+        self.search_entry.pack(fill=tk.X, pady=(4, 0))
+        self.search_entry.bind("<KeyRelease>", self._on_search_changed)
+        self.search_entry.bind("<Return>", self._on_search_enter)
 
-        self.clear_btn = tk.Button(
-            search_row,
-            text="✕",
-            font=("Segoe UI", 9, "bold"),
-            bg=self.NAVY,
-            fg="white",
-            bd=0,
-            activebackground=self.NAVY_2,
-            activeforeground="white",
-            command=self._clear_search,
-            padx=8,
-        )
-        self.clear_btn.pack(side=tk.LEFT, padx=(8, 0))
-
-        self.search_hint = tk.Label(
-            nav_header,
-            text="Search topics & help text… (Enter to jump)",
-            bg=self.NAVY,
-            fg="#DDE7F5",
-            font=("Segoe UI", 8),
-            padx=10,
-        )
-        self.search_hint.pack(anchor="w", pady=(0, 8))
-
+        # Topic list
         self.topic_list = tk.Listbox(
             nav_card,
             height=16,
@@ -115,32 +96,28 @@ class HelpTab(ttk.Frame):
             highlightthickness=0,
             font=("Segoe UI", 10),
         )
-        self.topic_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.topic_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
 
-        # UPDATED topics
-        self._topics_all = [
+        # Updated topics
+        self._topics = [
             "Overview",
             "Files you need",
             "Recommended folder setup",
             "Quick start: Case Processing",
             "Quick start: Compare Cases",
+            "Straight Comparison (all scenarios)",
             "Batch compare workflow",
-            "Straight comparison sheet",
-            "How the columns work",
+            "How the +/- grouping works",
             "Performance tips",
             "Troubleshooting",
             "Version / Contact",
         ]
-        self._topics_visible = list(self._topics_all)
+        self._topics_master = list(self._topics)
 
-        for t in self._topics_visible:
+        for t in self._topics:
             self.topic_list.insert(tk.END, t)
 
         self.topic_list.bind("<<ListboxSelect>>", self._on_topic_selected)
-
-        # Search bindings
-        self.search_entry.bind("<KeyRelease>", self._on_search_change)
-        self.search_entry.bind("<Return>", self._on_search_enter)
 
         # RIGHT: content area
         right = ttk.Frame(outer)
@@ -205,12 +182,15 @@ class HelpTab(ttk.Frame):
 
         ttk.Label(
             footer,
-            text="Tip: Use the search box on the left to instantly find where a feature is documented.",
+            text="Tip: Local folders are faster than network shares. Close Excel if files are locked.",
             foreground=self.MUTED,
         ).grid(row=0, column=0, sticky="w")
 
         # Select first topic + render
-        self._select_topic("Overview")
+        self.topic_list.selection_clear(0, tk.END)
+        self.topic_list.selection_set(0)
+        self.topic_list.activate(0)
+        self._render_topic("Overview")
 
     def _configure_text_tags(self):
         self.text.tag_configure(
@@ -227,20 +207,12 @@ class HelpTab(ttk.Frame):
             spacing1=10,
             spacing3=4,
         )
-        self.text.tag_configure(
-            "p",
-            font=("Segoe UI", 10),
-            foreground=self.TEXT,
-            spacing1=2,
-            spacing3=4,
-        )
+        self.text.tag_configure("p", font=("Segoe UI", 10), foreground=self.TEXT, spacing1=2, spacing3=4)
         self.text.tag_configure("muted", font=("Segoe UI", 10), foreground=self.MUTED)
 
-        # bullets + numbered steps
         self.text.tag_configure("bullet", font=("Segoe UI", 10), lmargin1=22, lmargin2=42, spacing3=2)
         self.text.tag_configure("num", font=("Segoe UI", 10), lmargin1=22, lmargin2=42, spacing3=2)
 
-        # callout + code blocks
         self.text.tag_configure(
             "callout",
             font=("Segoe UI", 10),
@@ -262,20 +234,19 @@ class HelpTab(ttk.Frame):
 
         self.text.tag_configure("divider", foreground=self.DIVIDER)
 
-        # search highlight tag
-        self.text.tag_configure("search_hit", background=self.HILITE_BG)
+        # highlight hits after search-open
+        self.text.tag_configure("hit", background=self.HILITE_BG)
 
-        # make read-only but selectable
         self.text.configure(state="disabled")
 
     # ---------------- Content model ---------------- #
 
     def _folder_template(self) -> str:
         return """<WorkingFolder>\\
-  ├─ Cases\\              (your .pwb files)
+  ├─ Cases\\              (.pwb files)
   ├─ Exports\\            (raw ViolationCTG exports)
   ├─ Filtered\\           (filtered outputs)
-  ├─ Comparisons\\        (combined / compare workbooks)
+  ├─ Comparisons\\        (Combined workbook + Batch outputs)
   └─ Batch\\              (queued batch comparison outputs)
 """
 
@@ -283,33 +254,31 @@ class HelpTab(ttk.Frame):
         return {
             "Overview": [
                 ("h1", "What this tool does"),
-                ("p", "This tool helps you export, filter, and compare PowerWorld ViolationCTG results in a repeatable, shareable format."),
+                ("p", "Exports, filters, and compares PowerWorld ViolationCTG results in a repeatable format."),
                 ("h2", "Main features"),
-                ("bullet", "Export ViolationCTG to CSV via SimAuto (when available)"),
-                ("bullet", "Filter rows (LimViolCat) and remove unwanted columns (blacklist)"),
-                ("bullet", "Optional LimViolID max filter (keeps highest Percent Loading per Resulting Issue)"),
-                ("bullet", "Build a Combined workbook (.xlsx) with consistent formatting"),
-                ("bullet", "Compare two scenarios (Left vs Right) with a percent threshold"),
-                ("bullet", "Queue multiple comparisons and build a batch workbook for sharing"),
-                ("bullet", "Auto-build a Straight Comparison sheet (all originals side-by-side)"),
-                ("h2", "What’s new in the output"),
-                ("bullet", "Limit is included in comparisons (so you don’t have to cross-reference)"),
-                ("bullet", "Contingency Value (MVA) is included"),
-                ("bullet", "Limit / Value / Percent are rounded to 1 decimal place"),
-                ("callout", "Sharing tip: Send coworkers the Batch Comparison workbook — it is self-contained."),
+                ("bullet", "Case Processing: export ViolationCTG CSVs and produce filtered outputs"),
+                ("bullet", "Combined workbook: one sheet per scenario, blue-block formatted"),
+                ("bullet", "Compare Cases: Left vs Right with threshold + delta/status"),
+                ("bullet", "Batch workbook: one sheet per queued pair"),
+                ("bullet", "Straight Comparison: compares ALL original scenario sheets side-by-side"),
+                ("h2", "Recent updates you should know"),
+                ("bullet", "Expandable +/- issue grouping uses Excel outline (summary row ABOVE details)"),
+                ("bullet", "Batch workbook can be built with ONLY Straight Comparison (empty queue)"),
+                ("bullet", "Limit / MVA / % fields can be rounded to 1 decimal (when enabled in the build step)"),
+                ("callout", "Sharing tip: send coworkers the Batch workbook—it's self-contained."),
             ],
 
             "Files you need": [
                 ("h1", "Files you need"),
                 ("h2", "Inputs"),
-                ("bullet", ".pwb (PowerWorld case) — required only if exporting via SimAuto"),
-                ("bullet", "ViolationCTG .csv — supported if exported outside this tool"),
-                ("bullet", "Combined comparison .xlsx — used for Compare Cases tab"),
+                ("bullet", ".pwb (only required when exporting via SimAuto)"),
+                ("bullet", "ViolationCTG CSV exports (supported even if exported outside this tool)"),
+                ("bullet", "Combined comparison workbook (.xlsx) used by Compare Cases"),
                 ("h2", "Outputs created by the tool"),
                 ("bullet", "*_Filtered.csv (filtered export)"),
-                ("bullet", "Combined_ViolationCTG_Comparison.xlsx (formatted, one sheet per scenario)"),
-                ("bullet", "Batch comparison workbook (.xlsx) with one sheet per queued pair + Straight Comparison"),
-                ("callout", "If Excel has a workbook/CSV open, Windows may lock it. Close Excel before rerunning."),
+                ("bullet", "Combined_ViolationCTG_Comparison.xlsx"),
+                ("bullet", "Batch comparison workbook (.xlsx) with pair sheets + Straight Comparison"),
+                ("callout", "If Excel has a file open, Windows may lock it. Close Excel before rerunning."),
             ],
 
             "Recommended folder setup": [
@@ -319,95 +288,83 @@ class HelpTab(ttk.Frame):
                 ("code", self._folder_template()),
                 ("h2", "Why this helps"),
                 ("bullet", "Faster reads/writes (local > network share)"),
-                ("bullet", "Easy to find outputs when someone asks for results"),
+                ("bullet", "Easy to locate outputs when someone asks for results"),
                 ("bullet", "Reduces accidental exports into random locations"),
-                ("callout", "Best practice: One working folder per study (LTWG, ACCA, etc.)."),
+                ("callout", "Best practice: one working folder per study."),
             ],
 
             "Quick start: Case Processing": [
                 ("h1", "Quick start: Case Processing"),
-                ("callout", "Goal: Produce clean filtered exports so comparisons are consistent."),
+                ("callout", "Goal: produce clean, consistent filtered exports for comparison."),
                 ("h2", "Steps"),
-                ("num", "1) Select the case folder / working folder (as your tab requires)."),
-                ("num", "2) Export ViolationCTG (SimAuto) OR point the tool at already-exported CSVs."),
-                ("num", "3) Apply filters (LimViolCat + optional LimViolID max filter)."),
-                ("num", "4) Confirm outputs saved (Filtered folder)."),
+                ("num", "1) Select the working folder."),
+                ("num", "2) Export ViolationCTG (SimAuto) or point at existing CSV exports."),
+                ("num", "3) Apply filters (LimViolCat + optional LimViolID max behavior depending on your pipeline)."),
+                ("num", "4) Confirm outputs saved under Filtered/."),
                 ("h2", "Common pitfalls"),
-                ("bullet", "PowerWorld + SimAuto must be available on the machine running exports"),
-                ("bullet", "Close CSV/Excel outputs before rerunning to avoid file locks"),
+                ("bullet", "SimAuto export requires PowerWorld installed and available"),
+                ("bullet", "Close CSV/Excel outputs before rerunning (file locks)"),
             ],
 
             "Quick start: Compare Cases": [
                 ("h1", "Quick start: Compare Cases"),
-                ("callout", "Goal: See what got better/worse between two scenarios."),
+                ("callout", "Goal: see what got better/worse between two scenarios."),
                 ("h2", "Steps"),
-                ("num", "1) Open the Combined workbook (.xlsx)."),
-                ("num", "2) Pick Left and Right scenario sheets."),
-                ("num", "3) Set threshold (example: 80). Rows where max(Left, Right) < threshold are skipped."),
+                ("num", "1) Open the combined workbook (.xlsx)."),
+                ("num", "2) Pick Left and Right sheets."),
+                ("num", "3) Set threshold (example: 80%). Rows below threshold are omitted."),
                 ("num", "4) Click Compare."),
-                ("h2", "What you see"),
-                ("bullet", "Contingency Events"),
-                ("bullet", "Resulting Issue"),
-                ("bullet", "Limit (now included)"),
-                ("bullet", "Left % and Right % (or scenario columns depending on view)"),
-                ("bullet", "Delta/Status (Only in Left / Only in Right / numeric delta)"),
-                ("callout", "Batch compare sheets also include Limit so reviewers don’t have to open the source case."),
+                ("h2", "Queue tools"),
+                ("bullet", "Add to queue: store the current Left vs Right pair"),
+                ("bullet", "Delete selected: remove highlighted queued entries"),
+                ("bullet", "Clear all: wipe queue and start fresh"),
+                ("bullet", "Build queued workbook: exports a new .xlsx with one sheet per pair"),
+                ("callout", "Delta column shows numeric change or 'Only in left/right' when missing on one side."),
+            ],
+
+            "Straight Comparison (all scenarios)": [
+                ("h1", "Straight Comparison (all scenarios)"),
+                ("p", "This sheet compares ALL original scenario sheets side-by-side (no pair deltas)."),
+                ("h2", "What it includes"),
+                ("bullet", "Blue-block case type sections (ACCA LongTerm / ACCA / DCwAC)"),
+                ("bullet", "One column per scenario (sheet)"),
+                ("bullet", "Threshold applies to the max across scenarios"),
+                ("bullet", "+/- outline grouping can collapse by Resulting Issue (optional)"),
+                ("h2", "When to use it"),
+                ("bullet", "Spot the 'worst anywhere' issues across many scenarios quickly"),
+                ("bullet", "Share a single sheet for broad review"),
             ],
 
             "Batch compare workflow": [
                 ("h1", "Batch compare workflow"),
-                ("callout", "This is the best way to package results for coworkers."),
+                ("callout", "Best way to package results for coworkers."),
                 ("h2", "Workflow"),
-                ("num", "1) Load the Combined workbook."),
-                ("num", "2) Add all needed Left vs Right pairs to the queue."),
-                ("num", "3) Build queued workbook and save it into your working folder."),
-                ("h2", "What’s inside the output workbook"),
-                ("bullet", "One sheet per queued pair (styled blue blocks)"),
-                ("bullet", "Expandable (+/-) issue groups; max row is bold and visible"),
-                ("bullet", "Limit included in the pair sheets (Column D)"),
-                ("bullet", "Straight Comparison sheet is also generated (if originals are detected)"),
+                ("num", "1) Load the combined workbook."),
+                ("num", "2) Add needed Left vs Right pairs to the queue (optional)."),
+                ("num", "3) Build batch workbook."),
+                ("num", "4) Batch workbook includes pair sheets + Straight Comparison (when available)."),
                 ("h2", "Naming suggestion"),
                 ("code", "Batch_Comparison_<StudyName>.xlsx\nExample: Batch_Comparison_LTWG26W.xlsx"),
             ],
 
-            "Straight comparison sheet": [
-                ("h1", "Straight Comparison sheet"),
-                ("p", "This sheet compares ALL original scenario sheets side-by-side (no pairwise deltas)."),
-                ("h2", "When it’s created"),
-                ("bullet", "Generated during batch workbook build"),
-                ("bullet", "Uses original scenario sheets detected in the source workbook"),
-                ("h2", "What it’s for"),
-                ("bullet", "Great for quickly seeing worst-case across many scenarios"),
-                ("bullet", "Useful when you want one table instead of many pair sheets"),
-                ("h2", "Expandable view"),
-                ("bullet", "Rows group by Resulting Issue (+/- outline)"),
-                ("bullet", "The max row per Resulting Issue is bolded and shown first"),
-            ],
-
-            "How the columns work": [
-                ("h1", "How the columns work"),
-                ("h2", "Combined workbook sheets (per scenario)"),
-                ("bullet", "Contingency Events: CTGLabel"),
-                ("bullet", "Resulting Issue: LimViolID (blank rows may inherit the issue above)"),
-                ("bullet", "Limit: LimViolLimit (shown in Column D)"),
-                ("bullet", "Contingency Value (MVA): LimViolValue (Column E)"),
-                ("bullet", "Percent Loading: LimViolPct (Column F)"),
-                ("callout", "Limit, Value (MVA), and Percent Loading are rounded to 1 decimal place for consistency."),
-                ("h2", "Batch pair sheets"),
-                ("bullet", "Also include Limit so reviewers can assess severity instantly."),
-                ("h2", "Rounding behavior"),
-                ("bullet", "If value is numeric -> rounded to 1 decimal"),
-                ("bullet", "If value is text/blank -> written as-is"),
+            "How the +/- grouping works": [
+                ("h1", "How the +/- grouping works"),
+                ("p", "The outline dropdown is Excel's row grouping feature."),
+                ("h2", "Behavior"),
+                ("bullet", "Rows are grouped by Resulting Issue"),
+                ("bullet", "The top (max) row is the summary row and stays visible"),
+                ("bullet", "Detail rows are hidden under the +/-"),
+                ("bullet", "Summary row is ABOVE details so the +/- appears at the top row (cleaner)"),
+                ("callout", "If you don't want grouping, turn off the 'expandable issue view' option."),
             ],
 
             "Performance tips": [
                 ("h1", "Performance tips"),
                 ("h2", "Best practices"),
-                ("bullet", "Work locally when possible (network shares can be slower)"),
-                ("bullet", "Keep workbook + outputs in the same folder"),
-                ("bullet", "Avoid leaving giant workbooks open in Excel while running"),
-                ("bullet", "Batch in chunks if you have hundreds of sheet pairs"),
-                ("callout", "UI may look briefly “stuck” during heavy Excel I/O — that’s normal for large workbooks."),
+                ("bullet", "Work locally when possible (network shares can be slow)"),
+                ("bullet", "Avoid leaving giant workbooks open while building/exporting"),
+                ("bullet", "Batch in chunks if you have hundreds of pairs"),
+                ("callout", "The UI may look briefly 'stuck' during heavy Excel I/O — that’s normal."),
             ],
 
             "Troubleshooting": [
@@ -415,20 +372,19 @@ class HelpTab(ttk.Frame):
                 ("h2", "File locked / permission denied"),
                 ("bullet", "Close the workbook/CSV in Excel and rerun."),
                 ("h2", "No workbook loaded"),
-                ("bullet", "You must open an .xlsx before Compare/Batch actions work."),
-                ("h2", "No sheets detected for Straight Comparison"),
-                ("bullet", "Sheets that look like outputs (e.g., '... vs ...', 'Straight Comparison') are ignored."),
-                ("bullet", "If your originals have unusual formatting, detection may skip them."),
+                ("bullet", "Open an .xlsx before Compare/Batch actions work."),
+                ("h2", "No sheets detected"),
+                ("bullet", "Workbook may be protected/corrupt or not a normal Excel workbook."),
                 ("h2", "Export issues (SimAuto)"),
                 ("bullet", "Confirm PowerWorld is installed and SimAuto is available."),
-                ("callout", "If you’re stuck: copy the Compare Log and send it to the tool owner."),
+                ("callout", "If you're stuck: copy the Compare Log and send it to the tool owner."),
             ],
 
             "Version / Contact": [
                 ("h1", "Version / Contact"),
-                ("p", "Tool name: Contingency Comparison Tool"),
-                ("p", "Purpose: PowerWorld Results Export + Compare"),
-                ("p", "Version: v1.x"),
+                ("p", "Tool name: Contingency Comparator"),
+                ("p", "Purpose: PowerWorld ViolationCTG export + compare"),
+                ("p", "Version: v2.x"),
                 ("h2", "Owner"),
                 ("code", "Name: <your name>\nTeam: <your team>\nNotes: <anything coworkers should know>"),
             ],
@@ -436,75 +392,83 @@ class HelpTab(ttk.Frame):
 
     # ---------------- Search ---------------- #
 
-    def _clear_search(self):
-        self.search_var.set("")
-        self._last_query = ""
-        self._topics_visible = list(self._topics_all)
-        self._refresh_topic_list(self._topics_visible)
-        self._select_topic("Overview")
-
-    def _on_search_change(self, _event=None):
-        query = self.search_var.get().strip()
+    def _on_search_changed(self, _event=None):
+        q = self.search_var.get().strip()
         sections = self._get_sections()
 
-        if not query:
-            self._topics_visible = list(self._topics_all)
-            self._refresh_topic_list(self._topics_visible)
+        # secret trigger should be "enter", not while typing
+        if not q:
+            self._set_topic_list(self._topics_master)
             return
 
-        ordered = rank_topics(query, sections, self._topics_all)
-        self._topics_visible = ordered
-        self._refresh_topic_list(self._topics_visible)
+        ranked = rank_topics(q, sections, limit=50)
+        ordered = [r.topic for r in ranked]
+
+        # if ranking returns nothing, fall back to substring filter on titles
+        if not ordered:
+            q_low = q.lower()
+            ordered = [t for t in self._topics_master if q_low in t.lower()]
+
+        # keep only topics we actually display (defensive)
+        ordered = [t for t in ordered if t in self._topics_master]
+        self._set_topic_list(ordered if ordered else self._topics_master)
 
     def _on_search_enter(self, _event=None):
-        query = self.search_var.get().strip()
-        self._last_query = query
+        q = self.search_var.get().strip()
 
-        if not query:
+        # secret trigger: only fires on Enter
+        if probe(q):
+            self._launch_menu_one()
             return
 
-        # Jump to best match if any
-        if self._topics_visible:
-            self._select_topic(self._topics_visible[0])
+        sections = self._get_sections()
+        ranked = rank_topics(q, sections, limit=1)
+        if ranked:
+            topic = ranked[0].topic
+            self._select_topic(topic)
+            self._render_topic(topic)
+            self._highlight_query_hits(q)
         else:
-            messagebox.showinfo("No matches", "No help topics matched that search.")
+            # if nothing, just keep current topic
+            self._highlight_query_hits(q)
 
-    def _refresh_topic_list(self, topics):
+    def _set_topic_list(self, topics):
         self.topic_list.delete(0, tk.END)
         for t in topics:
             self.topic_list.insert(tk.END, t)
-
-        # If nothing matches, clear the view and show a hint
-        if not topics:
-            self.title_var.set("No results")
-            self._render_empty_search()
-
-    def _render_empty_search(self):
-        self.text.configure(state="normal")
-        self.text.delete("1.0", tk.END)
-        self._add_line("No matching help topics.", "h1")
-        self._add_line("Try searching for keywords like:", "p")
-        self._add_line("• limit", "bullet")
-        self._add_line("• straight comparison", "bullet")
-        self._add_line("• batch", "bullet")
-        self._add_line("• threshold", "bullet")
-        self.text.configure(state="disabled")
-
-    # ---------------- Rendering ---------------- #
+        if topics:
+            self.topic_list.selection_clear(0, tk.END)
+            self.topic_list.selection_set(0)
+            self.topic_list.activate(0)
 
     def _select_topic(self, topic: str):
-        # select topic in listbox (if present)
+        items = self.topic_list.get(0, tk.END)
+        for i, t in enumerate(items):
+            if t == topic:
+                self.topic_list.selection_clear(0, tk.END)
+                self.topic_list.selection_set(i)
+                self.topic_list.activate(i)
+                self.topic_list.see(i)
+                return
+
+    def _launch_menu_one(self):
+        """
+        Launch menu/Menu_One.py as a separate Python process.
+        """
         try:
-            idx = self._topics_visible.index(topic)
-        except ValueError:
-            idx = 0
+            root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            menu_path = os.path.join(root_dir, "menu", "Menu_One.py")
 
-        self.topic_list.selection_clear(0, tk.END)
-        if self.topic_list.size() > 0:
-            self.topic_list.selection_set(idx)
-            self.topic_list.activate(idx)
+            if not os.path.isfile(menu_path):
+                messagebox.showerror("Missing", f"Could not find:\n{menu_path}")
+                return
 
-        self._render_topic(topic)
+            # Run it as a separate process so the GUI stays alive
+            subprocess.Popen([sys.executable, menu_path], cwd=root_dir)
+        except Exception as e:
+            messagebox.showerror("Launch failed", str(e))
+
+    # ---------------- Rendering ---------------- #
 
     def _render_topic(self, topic: str):
         self._current_topic = topic
@@ -515,6 +479,7 @@ class HelpTab(ttk.Frame):
 
         self.text.configure(state="normal")
         self.text.delete("1.0", tk.END)
+        self.text.tag_remove("hit", "1.0", tk.END)
 
         for kind, content in blocks:
             if kind == "h1":
@@ -538,33 +503,38 @@ class HelpTab(ttk.Frame):
 
             self.text.insert(tk.END, "\n")
 
-        # subtle divider line at end
         self.text.insert(tk.END, "────────────────────────────────────────\n")
         self.text.tag_add("divider", "end-2l", "end-1l")
-
-        # apply search highlight if query exists
-        self._apply_search_highlight(self._last_query or self.search_var.get().strip())
 
         self.text.configure(state="disabled")
         self.text.yview_moveto(0.0)
 
-    def _apply_search_highlight(self, query: str):
-        # remove old highlights
-        self.text.tag_remove("search_hit", "1.0", tk.END)
-
+    def _highlight_query_hits(self, query: str):
+        """
+        Simple visible highlight: highlight each query token in the displayed text.
+        """
         q = (query or "").strip()
         if not q:
             return
 
-        # highlight all occurrences (case-insensitive)
-        start = "1.0"
-        while True:
-            idx = self.text.search(q, start, tk.END, nocase=True)
-            if not idx:
-                break
-            end = f"{idx}+{len(q)}c"
-            self.text.tag_add("search_hit", idx, end)
-            start = end
+        tokens = [t for t in q.split() if t]
+        if not tokens:
+            return
+
+        self.text.configure(state="normal")
+        self.text.tag_remove("hit", "1.0", tk.END)
+
+        for tok in tokens:
+            start = "1.0"
+            while True:
+                idx = self.text.search(tok, start, stopindex=tk.END, nocase=True)
+                if not idx:
+                    break
+                end = f"{idx}+{len(tok)}c"
+                self.text.tag_add("hit", idx, end)
+                start = end
+
+        self.text.configure(state="disabled")
 
     def _add_line(self, text: str, tag: str):
         start = self.text.index(tk.END)
@@ -609,7 +579,7 @@ class HelpTab(ttk.Frame):
         sections = self._get_sections()
         out = []
 
-        for topic in self._topics_all:
+        for topic in self._topics_master:
             blocks = sections.get(topic, [])
             out.append(topic)
             out.append("-" * len(topic))
