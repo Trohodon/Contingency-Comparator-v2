@@ -1,97 +1,131 @@
 # core/help_search.py
+#
+# Search + ranking helpers for Help tab.
+# GUI stays surface-level; this module does the work-heavy part.
+
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Iterable
 import re
-from typing import Dict, List, Tuple, Iterable, Any
-
-from .menu_launcher import launch_menu_one
 
 
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip().lower()
+@dataclass
+class RankedTopic:
+    topic: str
+    score: float
+    hits: List[Tuple[int, int]]  # (start_idx, end_idx) in normalized flattened topic text
 
 
-def _tokens(q: str) -> List[str]:
-    qn = _norm(q)
-    if not qn:
-        return []
-    parts = re.findall(r"[a-z0-9]+", qn)
-    # de-dupe but preserve order
-    seen = set()
-    out = []
-    for p in parts:
-        if p not in seen:
-            out.append(p)
-            seen.add(p)
-    return out
+_WORD_RE = re.compile(r"[A-Za-z0-9_']+")
+_WS_RE = re.compile(r"\s+")
 
 
-def rank_topics(query: str, topics: List[str], sections: Dict[str, List[Tuple[str, str]]]) -> List[str]:
-    """
-    Rank topics based on query relevance (title + content).
-    """
-    q = _norm(query)
-    if not q:
-        return list(topics)
-
-    toks = _tokens(q)
-    ranked = []
-
-    for t in topics:
-        score = 0.0
-        t_norm = _norm(t)
-
-        # Title weighting
-        if q == t_norm:
-            score += 100.0
-        if q and q in t_norm:
-            score += 40.0
-        for tok in toks:
-            if tok in t_norm:
-                score += 12.0
-
-        # Content weighting
-        blocks = sections.get(t, [])
-        blob = " ".join(_norm(str(content)) for _, content in blocks)
-        for tok in toks:
-            if not tok:
-                continue
-            hits = blob.count(tok)
-            if hits:
-                score += min(25.0, hits * 1.5)
-
-        if score > 0:
-            ranked.append((score, t))
-
-    ranked.sort(key=lambda x: (-x[0], x[1]))
-    return [t for _, t in ranked]
+def _normalize(s: str) -> str:
+    s = (s or "").lower()
+    s = _WS_RE.sub(" ", s).strip()
+    return s
 
 
-def route_query(
+def _tokenize(s: str) -> List[str]:
+    return _WORD_RE.findall(_normalize(s))
+
+
+def _flatten_blocks(blocks: Iterable[Tuple[str, str]]) -> str:
+    parts: List[str] = []
+    for _kind, content in blocks:
+        if content is None:
+            continue
+        parts.append(str(content).strip())
+    return "\n".join([p for p in parts if p])
+
+
+def _find_hits(text_norm: str, query_tokens: List[str]) -> List[Tuple[int, int]]:
+    hits: List[Tuple[int, int]] = []
+    if not query_tokens:
+        return hits
+
+    for tok in query_tokens:
+        if not tok:
+            continue
+        start = 0
+        while True:
+            idx = text_norm.find(tok, start)
+            if idx == -1:
+                break
+            hits.append((idx, idx + len(tok)))
+            start = idx + len(tok)
+
+    return sorted(set(hits), key=lambda x: (x[0], x[1]))
+
+
+def _score_topic(query_tokens: List[str], topic_title: str, blocks: Iterable[Tuple[str, str]]) -> RankedTopic:
+    title_norm = _normalize(topic_title)
+    body_flat = _flatten_blocks(blocks)
+    body_norm = _normalize(body_flat)
+
+    title_tokens = set(_tokenize(topic_title))
+    body_tokens = set(_tokenize(body_flat))
+
+    score = 0.0
+
+    # title matches (strong)
+    for qt in query_tokens:
+        if qt in title_tokens:
+            score += 6.0
+        elif qt in title_norm:
+            score += 3.0
+
+    # body matches (medium)
+    for qt in query_tokens:
+        if qt in body_tokens:
+            score += 2.0
+        elif qt in body_norm:
+            score += 1.0
+
+    # phrase bonus
+    q_phrase = " ".join(query_tokens).strip()
+    if q_phrase and q_phrase in title_norm:
+        score += 8.0
+    elif q_phrase and q_phrase in body_norm:
+        score += 4.0
+
+    hits = _find_hits(body_norm, query_tokens)
+    return RankedTopic(topic=topic_title, score=score, hits=hits)
+
+
+def _rt(query: str, topic_to_blocks: Dict[str, List[Tuple[str, str]]], *, limit: int = 25, min_score: float = 0.01):
+    q_norm = _normalize(query)
+    if not q_norm:
+        return [RankedTopic(t, 0.0, []) for t in list(topic_to_blocks.keys())[:limit]]
+
+    q_tokens = _tokenize(q_norm)
+    if not q_tokens:
+        return [RankedTopic(t, 0.0, []) for t in list(topic_to_blocks.keys())[:limit]]
+
+    ranked: List[RankedTopic] = []
+    for topic, blocks in topic_to_blocks.items():
+        r = _score_topic(q_tokens, topic, blocks)
+        if r.score >= min_score:
+            ranked.append(r)
+
+    ranked.sort(key=lambda r: (-r.score, r.topic.lower()))
+    return ranked[:limit]
+
+_TRIGGER = "menu one"
+
+def probe(q: str) -> bool:
+    """Returns True if query matches the secret trigger phrase."""
+    return _normalize(q) == _TRIGGER
+
+
+# --- Public API used by gui/help_view.py ------------------------------------
+
+def rank_topics(
     query: str,
-    topics: List[str],
-    sections: Dict[str, List[Tuple[str, str]]],
-) -> Dict[str, Any]:
-    """
-    Returns:
-      {
-        "topics": [...filtered/ranked topics...],
-        "best": "TopicName" or None,
-        "terms": [tokens used for highlighting],
-        "triggered": bool (menu launched)
-      }
-    """
-    qn = _norm(query)
-
-    triggered = False
-    if qn == _norm("Menu One"):
-        triggered = launch_menu_one()
-        # Keep the UI from “help searching” on the magic phrase
-        return {"topics": list(topics), "best": None, "terms": [], "triggered": triggered}
-
-    ranked = rank_topics(query, topics, sections)
-    if ranked:
-        return {"topics": ranked, "best": ranked[0], "terms": _tokens(query), "triggered": False}
-
-    # If nothing matches, don't destroy the nav; just show everything
-    return {"topics": list(topics), "best": None, "terms": _tokens(query), "triggered": False}
+    topic_to_blocks: Dict[str, List[Tuple[str, str]]],
+    *,
+    limit: int = 25,
+    min_score: float = 0.01,
+) -> List[RankedTopic]:
+    return _rt(query, topic_to_blocks, limit=limit, min_score=min_score)
