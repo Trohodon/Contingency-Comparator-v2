@@ -8,7 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Iterable
 import re
-import hashlib
 
 
 @dataclass
@@ -34,10 +33,9 @@ def _tokenize(s: str) -> List[str]:
 
 def _flatten_blocks(blocks: Iterable[Tuple[str, str]]) -> str:
     parts: List[str] = []
-    for kind, content in blocks:
+    for _kind, content in blocks:
         if content is None:
             continue
-        # keep headers; include all text
         parts.append(str(content).strip())
     return "\n".join([p for p in parts if p])
 
@@ -85,7 +83,7 @@ def _score_topic(query_tokens: List[str], topic_title: str, blocks: Iterable[Tup
         elif qt in body_norm:
             score += 1.0
 
-    # phrase bonus
+    # phrase bonus (token phrase)
     q_phrase = " ".join(query_tokens).strip()
     if q_phrase and q_phrase in title_norm:
         score += 8.0
@@ -115,25 +113,16 @@ def _rt(query: str, topic_to_blocks: Dict[str, List[Tuple[str, str]]], *, limit:
     return ranked[:limit]
 
 
-# -------- secret trigger (phrase not stored in plaintext) --------------------
-
-# This is sha256(normalized_phrase). The phrase itself is NOT in code.
-# You can regenerate it with:
-#   import hashlib
-#   hashlib.sha256("your phrase".lower().strip().encode("utf-8")).hexdigest()
-_MAGIC = "b2a0b23d7301f37bb2b1c6a8a7b6b2cfdfb6d0e8c2a3910d7e5c35a6ad1a0e1b"
+# --------- plain-text, case-insensitive ---------------------------
+# Normalization makes it ignore case and extra whitespace.
+_TRIGGER = "menu one"
 
 
 def probe(q: str) -> bool:
     """
-    Returns True if query matches the hidden trigger.
-    Name is intentionally bland.
+    Returns True if query matches the secret trigger phrase.
     """
-    s = _normalize(q)
-    if not s:
-        return False
-    h = hashlib.sha256(s.encode("utf-8")).hexdigest()
-    return h == _MAGIC
+    return _normalize(q) == _TRIGGER
 
 
 # --- Public API used by gui/help_view.py ------------------------------------
