@@ -1,148 +1,111 @@
 # core/menu_one_runner.py
-#
-# Launch + single-instance guard for the Menu One easter egg.
-# Works in dev (python) and in PyInstaller onefile EXE.
 
 from __future__ import annotations
 
-import atexit
 import os
 import sys
 import tempfile
-import subprocess
-
-# IMPORTANT: This import ensures PyInstaller includes the menu package.
-# (Even if you only run it via a flag in the EXE)
-try:
-    import menu.Menu_One as _menu_one  # noqa: F401
-except Exception:
-    _menu_one = None  # will still work in frozen EXE if bundled correctly
+import traceback
+import socket
 
 
-_LOCK_FH = None
+# Choose a stable port unlikely to collide with common services
+# (only used on localhost for single-instance locking)
+_LOCK_PORT = 48573
 
 
-def _lockfile_path() -> str:
-    # per-user temp lock
-    return os.path.join(tempfile.gettempdir(), "menu_one.lock")
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
 
 
-def _try_acquire_lock() -> bool:
+def _acquire_single_instance_lock() -> socket.socket | None:
     """
-    Cross-process lock.
-    - Windows: msvcrt.locking
-    - Unix: fcntl.flock
+    Try to bind a localhost TCP port. If bind fails, another instance is running.
+    Returns the bound socket if acquired; caller must keep it alive.
     """
-    global _LOCK_FH
-    if _LOCK_FH is not None:
-        return True  # already locked in this process
-
-    path = _lockfile_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        fh = open(path, "a+")
-    except Exception:
-        return False
-
-    try:
-        if os.name == "nt":
-            import msvcrt
-            try:
-                # lock 1 byte
-                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError:
-                fh.close()
-                return False
-        else:
-            import fcntl
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                fh.close()
-                return False
-
-        _LOCK_FH = fh
-        atexit.register(_release_lock)
-        return True
-
+        s.bind(("127.0.0.1", _LOCK_PORT))
+        s.listen(1)
+        return s
     except Exception:
         try:
-            fh.close()
+            s.close()
         except Exception:
             pass
-        return False
+        return None
 
 
-def _release_lock():
-    global _LOCK_FH
-    if _LOCK_FH is None:
-        return
-    try:
-        if os.name == "nt":
-            import msvcrt
-            try:
-                _LOCK_FH.seek(0)
-                msvcrt.locking(_LOCK_FH.fileno(), msvcrt.LK_UNLCK, 1)
-            except Exception:
-                pass
-        else:
-            import fcntl
-            try:
-                fcntl.flock(_LOCK_FH.fileno(), fcntl.LOCK_UN)
-            except Exception:
-                pass
-    finally:
-        try:
-            _LOCK_FH.close()
-        except Exception:
-            pass
-        _LOCK_FH = None
-
-
-def launch_menu_one_detached(root_dir: str | None = None) -> bool:
+def _write_fail_log(exc: BaseException) -> str:
     """
-    Launch Menu One as a separate process.
-    Returns True if launched, False if already running or failed.
+    Write a crash log somewhere users can find it.
+    Returns the log path.
     """
-    # Prevent multiple launches (even if user spams Enter)
-    if not _try_acquire_lock():
-        return False
-
     try:
-        cwd = root_dir or os.getcwd()
-
-        if getattr(sys, "frozen", False):
-            # In onefile EXE, run THIS exe with a private flag.
-            cmd = [sys.executable, "--menu-one"]
-        else:
-            # In dev: run as a module
-            cmd = [sys.executable, "-m", "menu.Menu_One"]
-
-        # detached Popen so GUI stays alive
-        subprocess.Popen(cmd, cwd=cwd)
-        return True
-
+        log_path = os.path.join(tempfile.gettempdir(), "dcc_menu_one.log")
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("Menu One launch failed.\n\n")
+            f.write("argv:\n")
+            f.write(" ".join(sys.argv) + "\n\n")
+            f.write("frozen: " + str(_is_frozen()) + "\n\n")
+            f.write("traceback:\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+        return log_path
     except Exception:
-        # If we failed to launch, release lock so user can try again.
-        _release_lock()
-        return False
+        return ""
+
+
+def _show_windows_messagebox(title: str, message: str):
+    """
+    Optional: show a message box without Tk.
+    Works only on Windows; safe no-op elsewhere.
+    """
+    try:
+        import ctypes  # type: ignore
+        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)  # MB_ICONERROR
+    except Exception:
+        pass
 
 
 def maybe_run_menu_one_from_argv() -> bool:
     """
-    Call this near the start of your app entrypoint.
-    If '--menu-one' is present, runs Menu One IN THIS PROCESS and exits True.
-    Otherwise returns False.
+    If '--menu-one' is in argv, run Menu One and return True.
+    If not present, return False.
+
+    IMPORTANT: This must be called very early (before creating Tk).
     """
     if "--menu-one" not in sys.argv:
         return False
 
-    # single instance guard in the child process too
-    if not _try_acquire_lock():
-        return True  # already running elsewhere; silently exit path
+    # single-instance guard
+    lock = _acquire_single_instance_lock()
+    if lock is None:
+        # Another Menu One is already running; do nothing (prevents multi-open)
+        return True
 
-    # Import here (safe if bundled)
-    import menu.Menu_One as menu_one
-    menu_one.main()
-    return True
+    try:
+        # Import and run the game.
+        # This requires menu/ to be packaged (PyInstaller hiddenimports/collect-submodules).
+        from menu.Menu_One import main as menu_main  # noqa: F401
+
+        menu_main()
+        return True
+
+    except Exception as e:
+        log_path = _write_fail_log(e)
+
+        # In a frozen exe, silent failure is annoying—give at least one hint.
+        if _is_frozen():
+            msg = "Menu One failed to launch."
+            if log_path:
+                msg += f"\n\nLog written to:\n{log_path}"
+            _show_windows_messagebox("Menu One", msg)
+
+        return True
+
+    finally:
+        # Keep lock socket alive until we exit this runner
+        try:
+            lock.close()
+        except Exception:
+            pass
