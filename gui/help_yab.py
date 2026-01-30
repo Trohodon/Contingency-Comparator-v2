@@ -432,19 +432,32 @@ class HelpTab(ttk.Frame):
                 return
 
     def _launch_menu_one(self):
-        # extra in-GUI debounce
-        if self._menu_launching:
-            return
-        self._menu_launching = True
+    """
+    Launch Menu One in a separate process.
+    - In EXE (frozen): relaunch this EXE with --menu-one
+    - In VS (python): run python main.py --menu-one
+    """
+    try:
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-        try:
-            ok = launch_menu_one_detached()
-            # If it was already running, we just silently ignore (as requested)
-            # If you want a tiny toast later, we can add it, but keeping it quiet is cleaner.
-            _ = ok
-        finally:
-            # let user trigger again later if they closed it
-            self.after(750, lambda: setattr(self, "_menu_launching", False))
+        is_frozen = bool(getattr(sys, "frozen", False))
+
+        if is_frozen:
+            # sys.executable == the built EXE
+            cmd = [sys.executable, "--menu-one"]
+        else:
+            # sys.executable == python.exe, so we must pass the script
+            main_py = os.path.join(root_dir, "main.py")
+            if not os.path.isfile(main_py):
+                messagebox.showerror("Missing", f"Could not find:\n{main_py}")
+                return
+            cmd = [sys.executable, main_py, "--menu-one"]
+
+        subprocess.Popen(cmd, cwd=root_dir)
+
+    except Exception as e:
+        messagebox.showerror("Launch failed", str(e))
+
 
     # ---------------- Rendering ---------------- #
 
