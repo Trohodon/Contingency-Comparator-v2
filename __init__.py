@@ -1,32 +1,32 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+import clr
+import sys
+from pathlib import Path
+import System
 
-  <Product
-    Id="*"
-    Name="Contingency Comparator"
-    Language="1033"
-    Version="1.0.0"
-    Manufacturer="Dominion Energy"
-    UpgradeCode="PUT-UPGRADE-GUID-HERE">
+DLL_PATH = Path(r"\\mbu.ad.dominionnet.com\data\TRANSMISSION OPERATIONS CENTER\7T\Data2\DESC_Trans_Planning\LTR_General\SOFTWARE\_IN HOUSE\TLICs\bin\tliclib.dll")
+# ^ make sure this points exactly to the dll file
 
-    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
-    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
-    <MediaTemplate />
+# Make sure the DLL folder is on sys.path (helps dependency resolution)
+sys.path.append(str(DLL_PATH.parent))
 
-    <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFilesFolder">
-        <Directory Id="INSTALLFOLDER" Name="Contingency Comparator">
-          <Component Id="MainExe" Guid="PUT-COMPONENT-GUID-HERE">
-            <File Source="..\dist\ContingencyComparator.exe" KeyPath="yes" />
-          </Component>
-        </Directory>
-      </Directory>
-    </Directory>
+# Add reference (good practice, though reflection will still work without it)
+clr.AddReference(str(DLL_PATH))
 
-    <Feature Id="MainFeature" Title="Contingency Comparator" Level="1">
-      <ComponentRef Id="MainExe" />
-    </Feature>
+# Load assembly for reflection
+asm = System.Reflection.Assembly.LoadFile(str(DLL_PATH))
 
-  </Product>
+# Find the type safely
+tline_type = None
+for t in asm.GetTypes():
+    if t.FullName == "TLICLib.TLine":
+        tline_type = t
+        break
 
-</Wix>
+print("tline_type =", tline_type)
+
+if tline_type is None:
+    raise Exception("Could not find TLICLib.TLine inside assembly")
+
+print("\nMethods on TLine:\n")
+for m in tline_type.GetMethods():
+    print(m.Name)
