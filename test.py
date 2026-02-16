@@ -1,13 +1,15 @@
 """
-TLIC DLL Inspector (pythonnet)
+TLIC DLL Inspector (pythonnet) - FIXED VERSION
 
 What this does:
 - Verifies the DLL path is real (exists, size, timestamp, hash)
-- Loads the DLL in a reliable way (LoadFrom)
+- Loads the DLL reliably (LoadFrom)
 - Prints assembly identity + load location
 - Lists all types inside the DLL
-- Locates TLICLib.TLine
-- Prints constructors, properties, and methods for TLine (and optionally other classes)
+- Locates TLICLib.TLine (uses asm.GetType + safe fallback)
+- Prints constructors, properties, and methods for:
+    - TLICLib.TLine
+    - (optional) Branch / Structure / Conductor / Position
 
 Install:
     pip install pythonnet
@@ -28,9 +30,8 @@ import System
 # CONFIG: SET YOUR DLL PATH
 # =========================
 DLL_PATH = Path(
-    r"\\mbu.ad.dominionnet.com\data\TRANSMISSION OPERATIONS CENTER\7T\Data2\DESC_Trans_Planning\LTR_General\SOFTWARE\_IN HOUSE\TLICs\bin\tliclib.dll"
+    r"\\mbu.ad.dominionnet.com\data\TRANSMISSION OPERATIONS CENTER\7T\Data2\DESC_Trans_Planning\LTR_General\SOFTWARE\_IN HOUSE\TLICs\Source\TLICs\bin\Release\tliclib.dll"
 )
-
 # If you want to keep a local copy for stability, set this instead:
 # DLL_PATH = Path(r"C:\Users\isaak01\source\repos\TLIC_Remake\libs\tliclib.dll")
 
@@ -53,8 +54,8 @@ def dump_loaded_tliclib_assemblies():
             if name and name.lower() == "tliclib":
                 loaded.append((a.FullName, a.Location))
         except Exception:
-            # Some dynamic assemblies can throw on Location
             loaded.append((str(a.FullName), "<no location>"))
+
     print("\nAlready-loaded 'tliclib' assemblies in this process:")
     if not loaded:
         print("  (none)")
@@ -71,8 +72,8 @@ def load_assembly(path: Path) -> System.Reflection.Assembly:
     # Helps dependency resolution if there are other DLLs next to it
     sys.path.append(str(path.parent))
 
-    # AddReference is fine but not required for reflection;
-    # we still do it because you’ll likely want to CALL into types later.
+    # AddReference is useful if you later want to instantiate/call into types.
+    # It is not strictly required for reflection.
     clr.AddReference(str(path))
 
     # Load for reflection
@@ -88,10 +89,20 @@ def list_types(asm: System.Reflection.Assembly):
     return types
 
 
-def get_type_exact(types, full_name: str):
-    for t in types:
-        if t.FullName == full_name:
-            return t
+def find_type(asm: System.Reflection.Assembly, types, full_name: str):
+    """
+    Best-effort type resolution:
+    1) asm.GetType(...) (preferred)
+    2) fallback scan with safe string conversion
+    """
+    t = asm.GetType(full_name)
+    if t is not None:
+        return t
+
+    for tt in types:
+        if str(tt.FullName) == full_name:
+            return tt
+
     return None
 
 
@@ -120,13 +131,13 @@ def print_type_details(t):
                 pt = str(p.PropertyType)
             print(f"  {p.Name}: {pt}")
 
-    # Methods (filter out the huge Object base methods if you want)
+    # Methods
     print("\n-- Methods --")
     methods = t.GetMethods()
     if methods is None or len(methods) == 0:
         print("  (none)")
     else:
-        # Show unique method names in order (cleaner)
+        # Show unique method names in order (cleaner than duplicates/overloads)
         seen = set()
         for m in methods:
             name = m.Name
@@ -153,7 +164,7 @@ def main():
     print("MTime   =", st.st_mtime)
     print("SHA256(first1MB) =", sha256_first_mb(DLL_PATH))
 
-    # Important: if VS/debugger has already loaded some tliclib, show it
+    # Show any already-loaded tliclib assemblies (helps debug VS load-context issues)
     dump_loaded_tliclib_assemblies()
 
     # Load assembly
@@ -164,12 +175,13 @@ def main():
     # List types
     types = list_types(asm)
 
-    # Find TLine
-    tline = get_type_exact(types, "TLICLib.TLine")
+    # Find TLine (fixed resolution)
+    tline = find_type(asm, types, "TLICLib.TLine")
+    print("\nResolved TLine =", tline)
+
     if tline is None:
-        print("\n!!! Could not find TLICLib.TLine in this assembly.")
-        print("Tip: This usually means you're pointing at a different tliclib.dll than expected.")
-        print("Tip: Look above at the Types list and confirm which namespace/class names exist.")
+        print("\n!!! Could not find TLICLib.TLine in this assembly (unexpected if it appears in type list).")
+        print("If it IS in the type list above, this indicates a load-context/type-resolution issue.")
         return
 
     # Print TLine details
@@ -181,8 +193,9 @@ def main():
         "TLICLib.Structure",
         "TLICLib.Conductor",
         "TLICLib.Position",
+        "TLICLib.ITLine",
     ]:
-        t = get_type_exact(types, name)
+        t = find_type(asm, types, name)
         if t is not None:
             print_type_details(t)
 
