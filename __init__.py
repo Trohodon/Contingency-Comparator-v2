@@ -1,1 +1,0 @@
-"""Menu One game package."""
