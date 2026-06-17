@@ -1,3 +1,109 @@
+from tkinter import *
+from tkinter.filedialog import askdirectory
+from tkinter.filedialog import askopenfilename
+import tkinter.filedialog
+import tkinter.messagebox
+import sys
+
+sys.path.append("C:\\Program Files (x86)\\PTI\\PSSE33\\PSSBIN")
+
+import psse35
+import psspy
+
+import win32com.client
+import time
+import string
+import os
+import winreg
+import pywintypes
+import re
+
+#create a new window
+#
+root = Tk()
+root.title('Compare .sav Case Tool')
+root.geometry('900x300+367+276')
+root.resizable(width = False, height = False)
+
+global SourceDir
+global FirstFile
+global SecondFile
+global DestinationDir
+
+SourceDir = StringVar()
+FirstFile = StringVar()
+SecondFile = StringVar()
+DestinationRootDir = StringVar()
+
+def first_file_select():
+    FirstFile = tkinter.filedialog.askopenfilename(title = "Select file", filetypes = [("Save Case File","*.sav")])
+    FirstFileEntry.insert(0, FirstFile)
+    FirstFileEntry.xview(END)
+
+    if len(FirstFileEntry.get()) != 0:
+        FirstFileEntry.delete(0, END)
+        FirstFileEntry.insert(0, FirstFile)
+        FirstFileEntry.xview(END)
+
+def second_file_select():
+    SecondFile = tkinter.filedialog.askopenfilename(title = "Select file", filetypes = [("Save Case File","*.sav")])
+    SecondFileEntry.insert(0, SecondFile)
+    SecondFileEntry.xview(END)
+
+    if len(SecondFileEntry.get()) != 0:
+        SecondFileEntry.delete(0, END)
+        SecondFileEntry.insert(0, SecondFile)
+        SecondFileEntry.xview(END)
+
+def destination_dir_select():
+    DestinationDir = tkinter.filedialog.askdirectory(title = "Select Folder")
+    DestinationRootDirEntry.insert(0, DestinationDir)
+    DestinationRootDirEntry.xview(END)
+
+    if len(DestinationRootDirEntry.get()) != 0:
+        DestinationRootDirEntry.delete(0, END)
+        DestinationRootDirEntry.insert(0, DestinationDir)
+        DestinationRootDirEntry.xview(END)
+
+#
+
+def createExcelSpreadsheet():
+    # Create the workbook.
+    xlApp = win32com.client.Dispatch("Excel.Application")
+    xlApp.DisplayAlerts = False
+
+    # Set below to False to hide the spreadsheet while working, or True to show it.
+    xlApp.Visible = False
+    xlApp.Workbooks.Add()
+    xlBook = xlApp.ActiveWorkbook
+    return xlApp, xlBook
+
+def createTitleBlock(xlBook):
+    xlSheet = xlBook.Worksheets.Add()    # Add a sheet for the title.
+    xlSheet.Name = 'Title'
+    xlSheet.Range("A:Z").Font.Name = "Courier New"
+
+    print("Creating title block.")
+    title1, title2 = psspy.titldt()
+
+    data = [[title1],[title2]]
+    data.append([''])    #creates a blank row
+
+    #data.append(["REGION CHECKED : %s" % region[0]])
+    data.append(["AREAS CHECKED : SCFG"])
+
+    data.append([''])    #creates a blank row
+
+    data.append([time.strftime("PROCESSED: %a, %d %b %Y %I:%M:%S %p",time.localtime()).upper()])
+
+    data.append([''])    #creates a blank row
+
+    data.append(['WORKING CASE = FIRST CASE'])
+    data.append(['IN = SECOND CASE'])
+
+    xlSheet.Cells(8,1).Font.Bold = True
+    xlSheet.Cells(9,1).Font.Bold = True
+
 def BranchRating(xlBook):
     xlSheet = xlBook.Worksheets.Add()
     xlSheet.Name = 'BranchRating'
