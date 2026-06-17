@@ -141,9 +141,9 @@ def Buses(xlBook):
     psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])      #create subsystem
     #prepare case for compare script. It is set up to compare based on bus numbers
     psspy.report_output(2, filename, [0,0])      #Redirect progress device to a file. Open with carriage control format or function may not work properly.
-    psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #initialize for case comparison.
-    psspy.diff(0,1,2,[0,1,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #compare BUSES WITH DIFFERENT NUMBER, NAME OR BASE VOLTAGE:
-    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #needed to close out DIFF function properly.
+    psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())      #initialize for case comparison.
+    psspy.diff(0,1,2,[0,1,0,0],[0.0,0.0,0.0],SecondFileEntry.get())      #compare BUSES WITH DIFFERENT NUMBER, NAME OR BASE VOLTAGE:
+    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())      #needed to close out DIFF function properly.
     #psspy.close_report()
     #Open the output file and send it to an Excel sheet.
     print("Reading file Buses_temp.txt")
@@ -172,18 +172,13 @@ def Machines(xlBook):
     directory = os.getcwd()
     filename = os.path.join(directory, "Machines_temp.txt")
 
-    psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
+    psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[]) #create subsystem
     #prepare case for compare script. It is set up to compare based on bus numbers
-
     psspy.report_output(2, filename, [0,0])
-
-    psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    psspy.diff(0,1,2,[0,3,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    #compare BUSES WITH DIFFERENT MACHINES OR MACHINE STATUS
-
-    psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-
-    psspy.close_report()
+    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,2,[0,3,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    #Open the output file and send it to an Excel sheet.
 
     print("Reading file Machines_temp.txt")
 
@@ -192,7 +187,7 @@ def Machines(xlBook):
         data.append([line.strip()])
 
     datafile.close()
-
+    #print("Write results.")
     sendToExcel(xlSheet, data, startrow = 2)
 
     xlSheet.Cells(1,1).Value = "CASE COMPARE"
@@ -219,16 +214,11 @@ def BranchStatus(xlBook):
     filename = os.path.join(directory, "BranchStatus_temp.txt")
 
     psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
-
     psspy.report_output(2, filename, [0,0])
-
-    psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    psspy.diff(0,1,2,[0,17,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    #compare BRANCHES WITH DIFFERENT SERVICE STATUS OR IN ONE CASE ONLY
-
-    psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-
-    psspy.close_report()
+    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,2,[0,17,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.close_report()
 
     print("Reading file BranchStatus_temp.txt")
 
@@ -239,17 +229,13 @@ def BranchStatus(xlBook):
     datafile.close()
 
     sendToExcel(xlSheet, data, startrow = 2)
-
     xlSheet.Cells(1,1).Value = "CASE COMPARE"
     xlSheet.Cells(1,1).HorizontalAlignment = -4108
     xlSheet.Cells(1,1).Font.Bold = True
-
     xlSheet.rows(2).EntireRow.Delete()
     xlSheet.rows(2).EntireRow.Delete()
-
     xlSheet.Columns("A:Z").AutoFit()
-
-    os.remove(filename)
+    #os.remove(filename)
 
     print("Done with Branch Status")
 
@@ -264,16 +250,11 @@ def BranchImp(xlBook):
     filename = os.path.join(directory, "BranchImp_temp.txt")
 
     psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
-
     psspy.report_output(2, filename, [0,0])
-
-    psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    psspy.diff(0,1,2,[0,18,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    #compare BRANCHES WITH DIFFERENT IMPEDANCE OR CHARGING
-
-    psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-
-    psspy.close_report()
+    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,2,[0,18,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.close_report()
 
     print("Reading file BranchImp_temp.txt")
 
@@ -283,6 +264,7 @@ def BranchImp(xlBook):
 
     datafile.close()
 
+    #print("Write results.")
     sendToExcel(xlSheet, data, startrow = 2)
 
     xlSheet.Cells(1,1).Value = "CASE COMPARE"
@@ -294,7 +276,7 @@ def BranchImp(xlBook):
 
     xlSheet.Columns("A:Z").AutoFit()
 
-    os.remove(filename)
+    #os.remove(filename)
 
     print("Done with Branch Imp")
 
@@ -309,16 +291,10 @@ def BranchRating(xlBook):
     filename = os.path.join(directory, "BranchRating_temp.txt")
 
     psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
-    #prepare case for compare script. It is set up to compare based on bus numbers
-
     psspy.report_output(2, filename, [0,0])
-    #Redirect progress device to a file.
-
-    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    psspy.diff(0,1,2,[0,20,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    #compare BRANCHES WITH DIFFERENT LINE RATINGS
-
-    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,2,[0,20,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
     #psspy.close_report()
 
     print("Reading file BranchRating_temp.txt")
@@ -359,10 +335,8 @@ def XFMRs(xlBook):
 
     psspy.report_output(2, filename, [0,0])      #Redirect progress device to a file. Open with carriage control format or function may not work properly.
 
-    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #initialize for case comparison.
-    psspy.diff(0,1,2,[0,22,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #compare TRANSFORMERS WITH DIFFERENT CONFIGURATION OR RATIO DIFFERING BY MORE THAN 0.00000 PU :
-    #psspy.close_report()                                                     #needed to close out DIFF function properly.
+    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())     
+    psspy.diff(0,1,2,[0,22,0,0],[0.0,0.1,0.0],SecondFileEntry.get())
 
     #Open the output file and send it to an Excel sheet.
 
