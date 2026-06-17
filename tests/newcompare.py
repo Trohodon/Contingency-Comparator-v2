@@ -89,12 +89,12 @@ def createTitleBlock(xlBook):
     data = [[title1],[title2]]
     data.append([''])    #creates a blank row
 
-    #data.append(["REGION CHECKED : %s" % region[0]])
-    data.append(["AREAS CHECKED : SCFG"])
+    #data.append(["REGION CHECKED : %6s" % region[0]])
+    data.append(["AREAS CHECKED : SCEG"])
 
     data.append([''])    #creates a blank row
 
-    data.append([time.strftime("PROCESSED: %a, %d %b %Y %I:%M:%S %p",time.localtime()).upper()])
+    data.append([time.strftime("PROCESSED: %a, %d %b %Y %I:%M:%S:%p",time.localtime()).upper()])
 
     data.append([''])    #creates a blank row
 
@@ -103,6 +103,18 @@ def createTitleBlock(xlBook):
 
     xlSheet.Cells(8,1).Font.Bold = True
     xlSheet.Cells(9,1).Font.Bold = True
+    data.append([''])    #creates a blank row
+    data.append(['The following items were compared:'])
+    data.append(['Buses'])
+    data.append(['Machines'])
+    data.append(['Branch Status'])
+    data.append(['Branch Impedance'])
+    data.append(['Branch Ratings'])
+    data.append(['Transformers'])
+    data.append(['Load Status'])
+    data.append(['Line Length'])
+
+    sendToExcel(xlSheet, data)
 
 def BranchRating(xlBook):
     xlSheet = xlBook.Worksheets.Add()
@@ -163,16 +175,14 @@ def XFMRs(xlBook):
     psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
     #prepare case for compare script. It is set up to compare based on bus numbers
 
-    psspy.report_output(2, filename, [0,0])
+    psspy.report_output(2, filename, [0,0])      #Redirect progress device to a file. Open with carriage control format or function may not work properly.
 
-    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    psspy.diff(0,1,2,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #initialize for case comparison.
+    psspy.diff(0,1,2,[0,22,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #compare TRANSFORMERS WITH DIFFERENT CONFIGURATION OR RATIO DIFFERING BY MORE THAN 0.00000 PU :
+    #psspy.close_report()                                                     #needed to close out DIFF function properly.
 
-    #compare TRANSFORMERS WITH DIFFERENT CONFIGURATION OR RATIO
-    #DIFFERING BY MORE THAN 0.0000 PU
-
-    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    #psspy.close_report()
+    #Open the output file and send it to an Excel sheet.
 
     print("Reading file XFMRs_temp.txt")
 
@@ -207,18 +217,18 @@ def Loads(xlBook):
     directory = os.getcwd()
     filename = os.path.join(directory, "Loads_temp.txt")
 
-    psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
+    psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])      #create subsystem
+    #prepare case for compare script. It is set up to compare based on bus numbers
+    psspy.report_output(2, filename, [0,0])                #Redirect progress device to a file. Open with carriage control format or function may not work properly.
 
-    psspy.report_output(2, filename, [0,0])
-
-    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    psspy.diff(0,1,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    #compare BUSES WITH DIFFERENT LOADS OR LOAD STATUS
-
+    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #initialize for case comparison.
+    psspy.diff(0,1,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())       #compare BUSES WITH DIFFERENT LOADS OR LOAD STATUS: (added this line)
     psspy.diff(0,1,2,[0,32,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
 
-    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #needed to close out DIFF function properly.
     #psspy.close_report()
+
+    #Open the output file and send it to an Excel sheet.
 
     print("Reading file Loads_temp.txt")
 
