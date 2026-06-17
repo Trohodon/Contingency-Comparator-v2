@@ -5,7 +5,7 @@ import tkinter.filedialog
 import tkinter.messagebox
 import sys
 
-sys.path.append("C:\\Program Files (x86)\\PTI\\PSSE33\\PSSBIN")
+sys.path.append("C:\Program Files (x86)\PTI\PSSE33\PSSBIN")
 
 import psse35
 import psspy
@@ -19,12 +19,12 @@ import pywintypes
 import re
 
 #create a new window
-#
+#_____________________________________________________________________________________________________
 root = Tk()
 root.title('Compare .sav Case Tool')
 root.geometry('900x300+367+276')
 root.resizable(width = False, height = False)
-
+#_____________________________________________________________________________________________________
 global SourceDir
 global FirstFile
 global SecondFile
@@ -34,7 +34,7 @@ SourceDir = StringVar()
 FirstFile = StringVar()
 SecondFile = StringVar()
 DestinationRootDir = StringVar()
-
+#_____________________________________________________________________________________________________
 def first_file_select():
     FirstFile = tkinter.filedialog.askopenfilename(title = "Select file", filetypes = [("Save Case File","*.sav")])
     FirstFileEntry.insert(0, FirstFile)
