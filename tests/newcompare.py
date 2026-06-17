@@ -65,7 +65,7 @@ def destination_dir_select():
         DestinationRootDirEntry.insert(0, DestinationDir)
         DestinationRootDirEntry.xview(END)
 
-#
+#_____________________________________________________________________________________________________
 
 def createExcelSpreadsheet():
     # Create the workbook.
@@ -255,25 +255,20 @@ def LineLength(xlBook):
 
     psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
     #prepare case for compare script. It is set up to compare based on bus numbers
-
     psspy.report_output(2, filename, [0,0])
-
     #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
     psspy.diff(0,1,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-
     #compare BRANCHES WITH DIFFERENT LINE LENGTHS
     psspy.diff(0,1,2,[0,33,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-
     #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
     #psspy.close_report()
 
     print("Reading file LineLength_temp.txt")
-
     datafile = open(filename, 'r')
     for line in datafile:
         data.append([line.strip()])
-
     datafile.close()
+    #print("Write results.")
 
     sendToExcel(xlSheet, data, startrow = 2)
 
@@ -306,7 +301,7 @@ def Compare_Cases_Excel():
     BranchRating(xlBook)
     BranchImp(xlBook)
     BranchStatus(xlBook)
-    Machines(xlBook)
+    Machines(xlBook) #NOTE: You must close the Diff API and close the report before you can delete the temporary file.
 
     createTitleBlock(xlBook)
 
@@ -327,20 +322,20 @@ def Compare_Cases_Excel():
     #os.remove("Machines_temp.txt")
     os.remove("Buses_temp.txt")
 
-    print("***Finished!***")
-
-    tkinter.messagebox.showinfo('Info', 'Finished! The file "CompareCase.xlsx" has been created!')
+    print("**Finished!**")
+    tkinter.messagebox.showinfo('Info','Finished! The file "CompareCase.xlsx" has been created!' )
 
     sys.exit(0)
+#_____________________________________________________________________________________________________
 
 DirectorySetupData = Frame(root, width = 900, height = 350)
 DirectorySetupData.pack()
 
-StaticLabel1 = Label(DirectorySetupData, justify = LEFT, text = 'Select Cases Below You Want To Compare. \nIf Destination Folder is left out, the result will be saved in Source Folder')
+StaticLabel1 = Label(DirectorySetupData, justify = LEFT ,text = 'Select Cases Below You Want To Compare. \nIf Destination Folder is left out, the result will be saved in Source Folder.' )
 StaticLabel1.place(x = 48, y = 30)
 
-#First .sav case info
-StaticLabel2 = Label(DirectorySetupData, justify = LEFT, text = 'First .sav Case: ')
+#First .save case info
+StaticLabel2 = Label(DirectorySetupData, justify = LEFT ,text = 'First .sav Case:' )
 StaticLabel2.place(x = 48, y = 70)
 
 FirstFileEntry = Entry(DirectorySetupData, width = 90)
@@ -349,8 +344,8 @@ FirstFileEntry.place(x = 50, y = 92)
 SourceDirButton = Button(DirectorySetupData, text = 'Select', width = 10, height = 1, command = first_file_select)
 SourceDirButton.place(x = 650, y = 90)
 
-#second .sav case info
-StaticLabel2 = Label(DirectorySetupData, justify = LEFT, text = 'Second .sav Case: ')
+#second .save case info
+StaticLabel2 = Label(DirectorySetupData, justify = LEFT ,text = 'Second .sav Case:' )
 StaticLabel2.place(x = 48, y = 115)
 
 SecondFileEntry = Entry(DirectorySetupData, width = 90)
@@ -360,7 +355,7 @@ SourceDirButton = Button(DirectorySetupData, text = 'Select', width = 10, height
 SourceDirButton.place(x = 650, y = 135)
 
 #Destination Folder
-StaticLabel3 = Label(DirectorySetupData, justify = LEFT, text = 'Results Destination Folder: ')
+StaticLabel3 = Label(DirectorySetupData, justify = LEFT ,text = 'Results Destination Folder:' )
 StaticLabel3.place(x = 48, y = 160)
 
 DestinationRootDirEntry = Entry(DirectorySetupData, width = 90)
