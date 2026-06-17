@@ -116,6 +116,142 @@ def createTitleBlock(xlBook):
 
     sendToExcel(xlSheet, data)
 
+def Machines(xlBook):
+    xlSheet = xlBook.Worksheets.Add()
+    xlSheet.Name = 'Machines'
+    xlSheet.Range("A:Z").Font.Name = "Courier New"
+    xlSheet.Tab.ColorIndex = 6    # Yellow tab
+
+    data = []
+    directory = os.getcwd()
+    filename = os.path.join(directory, "Machines_temp.txt")
+
+    psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
+    #prepare case for compare script. It is set up to compare based on bus numbers
+
+    psspy.report_output(2, filename, [0,0])
+
+    psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,2,[0,3,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    #compare BUSES WITH DIFFERENT MACHINES OR MACHINE STATUS
+
+    psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+
+    psspy.close_report()
+
+    print("Reading file Machines_temp.txt")
+
+    datafile = open(filename, 'r')
+    for line in datafile:
+        data.append([line.strip()])
+
+    datafile.close()
+
+    sendToExcel(xlSheet, data, startrow = 2)
+
+    xlSheet.Cells(1,1).Value = "CASE COMPARE"
+    xlSheet.Cells(1,1).HorizontalAlignment = -4108
+    xlSheet.Cells(1,1).Font.Bold = True
+
+    xlSheet.rows(2).EntireRow.Delete()
+    xlSheet.rows(2).EntireRow.Delete()
+
+    xlSheet.Columns("A:Z").AutoFit()
+
+    os.remove(filename)
+
+    print("Done with Machines")
+
+def BranchStatus(xlBook):
+    xlSheet = xlBook.Worksheets.Add()
+    xlSheet.Name = 'BranchStatus'
+    xlSheet.Range("A:Z").Font.Name = "Courier New"
+    xlSheet.Tab.ColorIndex = 6    # Yellow tab
+
+    data = []
+    directory = os.getcwd()
+    filename = os.path.join(directory, "BranchStatus_temp.txt")
+
+    psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
+
+    psspy.report_output(2, filename, [0,0])
+
+    psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,2,[0,17,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    #compare BRANCHES WITH DIFFERENT SERVICE STATUS OR IN ONE CASE ONLY
+
+    psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+
+    psspy.close_report()
+
+    print("Reading file BranchStatus_temp.txt")
+
+    datafile = open(filename, 'r')
+    for line in datafile:
+        data.append([line.strip()])
+
+    datafile.close()
+
+    sendToExcel(xlSheet, data, startrow = 2)
+
+    xlSheet.Cells(1,1).Value = "CASE COMPARE"
+    xlSheet.Cells(1,1).HorizontalAlignment = -4108
+    xlSheet.Cells(1,1).Font.Bold = True
+
+    xlSheet.rows(2).EntireRow.Delete()
+    xlSheet.rows(2).EntireRow.Delete()
+
+    xlSheet.Columns("A:Z").AutoFit()
+
+    os.remove(filename)
+
+    print("Done with Branch Status")
+
+def BranchImp(xlBook):
+    xlSheet = xlBook.Worksheets.Add()
+    xlSheet.Name = 'BranchImp'
+    xlSheet.Range("A:Z").Font.Name = "Courier New"
+    xlSheet.Tab.ColorIndex = 6    # Yellow tab
+
+    data = []
+    directory = os.getcwd()
+    filename = os.path.join(directory, "BranchImp_temp.txt")
+
+    psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
+
+    psspy.report_output(2, filename, [0,0])
+
+    psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,2,[0,18,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    #compare BRANCHES WITH DIFFERENT IMPEDANCE OR CHARGING
+
+    psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+
+    psspy.close_report()
+
+    print("Reading file BranchImp_temp.txt")
+
+    datafile = open(filename, 'r')
+    for line in datafile:
+        data.append([line.strip()])
+
+    datafile.close()
+
+    sendToExcel(xlSheet, data, startrow = 2)
+
+    xlSheet.Cells(1,1).Value = "CASE COMPARE"
+    xlSheet.Cells(1,1).HorizontalAlignment = -4108
+    xlSheet.Cells(1,1).Font.Bold = True
+
+    xlSheet.rows(2).EntireRow.Delete()
+    xlSheet.rows(2).EntireRow.Delete()
+
+    xlSheet.Columns("A:Z").AutoFit()
+
+    os.remove(filename)
+
+    print("Done with Branch Imp")
+
 def BranchRating(xlBook):
     xlSheet = xlBook.Worksheets.Add()
     xlSheet.Name = 'BranchRating'
