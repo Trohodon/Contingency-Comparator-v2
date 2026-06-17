@@ -116,6 +116,52 @@ def createTitleBlock(xlBook):
 
     sendToExcel(xlSheet, data)
 
+def sendToExcel(xlSheet, data, startrow = 1, startcol = 1, autofit = True):
+    # Takes a list of lists of strings representing rows/columns of data
+    # and pushes them to an Excel sheet.
+    endrow = len(data) - 1 + startrow
+    if len(data) != 0:
+        endcol = len(data[0]) - 1 + startcol
+    else:
+        endcol = startcol
+    xlSheet.Range(xlSheet.Cells(startrow,startcol),xlSheet.Cells(endrow, endcol)).Value = data
+    lastColumn = string.ascii_uppercase[endcol - 1]
+    if autofit == True:
+        xlSheet.Columns("A:%s" % lastColumn).AutoFit()
+
+def Buses(xlBook):
+    xlSheet = xlBook.Worksheets.Add()
+    xlSheet.Name = 'Buses'
+    xlSheet.Range("A:Z").Font.Name = "Courier New"
+    xlSheet.Tab.ColorIndex = 6 # Yellow tab
+    data = []
+    directory = os.getcwd()
+    print(directory)
+    filename = os.path.join(directory, "Buses_temp.txt")
+    psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])      #create subsystem
+    #prepare case for compare script. It is set up to compare based on bus numbers
+    psspy.report_output(2, filename, [0,0])      #Redirect progress device to a file. Open with carriage control format or function may not work properly.
+    psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #initialize for case comparison.
+    psspy.diff(0,1,2,[0,1,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #compare BUSES WITH DIFFERENT NUMBER, NAME OR BASE VOLTAGE:
+    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #needed to close out DIFF function properly.
+    #psspy.close_report()
+    #Open the output file and send it to an Excel sheet.
+    print("Reading file Buses_temp.txt")
+    datafile = open(filename, 'r')
+    for line in datafile:
+        data.append([line.strip()])
+    datafile.close()
+    #print("Write results.")
+    sendToExcel(xlSheet, data, startrow = 2)
+    xlSheet.Cells(1,1).Value = "CASE COMPARE"
+    xlSheet.Cells(1,1).HorizontalAlignment = -4108
+    xlSheet.Cells(1,1).Font.Bold = True
+    for x in range(13): #delete rows not needed
+        xlSheet.rows(2).EntireRow.Delete()
+    xlSheet.Columns("A:Z").AutoFit()
+    #os.remove(filename)
+    print("Done with Buses")
+
 def Machines(xlBook):
     xlSheet = xlBook.Worksheets.Add()
     xlSheet.Name = 'Machines'
