@@ -377,11 +377,12 @@ def Loads(xlBook):
     #prepare case for compare script. It is set up to compare based on bus numbers
     psspy.report_output(2, filename, [0,0])                #Redirect progress device to a file. Open with carriage control format or function may not work properly.
 
-    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #initialize for case comparison.
-    psspy.diff(0,1,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())       #compare BUSES WITH DIFFERENT LOADS OR LOAD STATUS: (added this line)
-    psspy.diff(0,1,2,[0,32,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())      #initialize for case comparison.
+    #
+    #psspy.diff(0,1,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())       #compare BUSES WITH DIFFERENT LOADS OR LOAD STATUS: (added this line)
+    psspy.diff(0,1,2,[0,32,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
 
-    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())      #needed to close out DIFF function properly.
+    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())      #needed to close out DIFF function properly.
     #psspy.close_report()
 
     #Open the output file and send it to an Excel sheet.
@@ -422,11 +423,10 @@ def LineLength(xlBook):
     psspy.bsys(0,0,[0.0,999.],1,[343],0,[],0,[],0,[])
     #prepare case for compare script. It is set up to compare based on bus numbers
     psspy.report_output(2, filename, [0,0])
-    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    psspy.diff(0,1,1,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    #compare BRANCHES WITH DIFFERENT LINE LENGTHS
-    psspy.diff(0,1,2,[0,33,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
-    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,0,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,1,1,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    psspy.diff(0,1,2,[0,33,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
+    #psspy.diff(0,1,3,[0,0,0,0],[0.0,0.0,0.0],SecondFileEntry.get())
     #psspy.close_report()
 
     print("Reading file LineLength_temp.txt")
